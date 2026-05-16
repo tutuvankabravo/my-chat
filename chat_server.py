@@ -224,18 +224,17 @@ HTML_PAGE = '''<!DOCTYPE html>
         .message:not(.own) .message-bubble { background: var(--bg-tertiary); border-bottom-left-radius: 4px; }
         .message.own .message-bubble { background: var(--accent); border-bottom-right-radius: 4px; }
         .message-username { font-size: 0.7em; font-weight: bold; margin-bottom: 3px; color: var(--accent); }
-        .message-text { font-size: 0.85em; word-wrap: break-word; }
+        .message-text { font-size: 0.85em; word-wrap: break-word; white-space: pre-wrap; }
         .message-time { font-size: 0.6em; opacity: 0.7; margin-top: 3px; text-align: right; }
         .typing-indicator { padding: 6px 16px; font-size: 0.75em; color: var(--text-secondary); font-style: italic; min-height: 32px; background: var(--bg-primary); flex-shrink: 0; }
         
-        /* ПОЛЕ ВВОДА - МИНИМАЛЬНЫЕ СКРУГЛЕНИЯ (8px вместо 25px) */
         .message-input {
             flex: 1;
             background: var(--bg-tertiary);
             border: 1px solid var(--border);
             color: var(--text-primary);
             padding: 10px 14px;
-            border-radius: 8px;  /* Уменьшил скругление */
+            border-radius: 8px;
             font-size: 0.9em;
             font-family: inherit;
             outline: none;
@@ -248,7 +247,6 @@ HTML_PAGE = '''<!DOCTYPE html>
             scrollbar-width: thin;
         }
         
-        /* Стили для ползунка */
         .message-input::-webkit-scrollbar {
             width: 4px;
         }
@@ -270,7 +268,7 @@ HTML_PAGE = '''<!DOCTYPE html>
             color: white;
             border: none;
             padding: 0 20px;
-            border-radius: 8px;  /* Тоже уменьшил скругление */
+            border-radius: 8px;
             cursor: pointer;
             font-weight: bold;
             font-size: 0.85em;
@@ -375,10 +373,13 @@ HTML_PAGE = '''<!DOCTYPE html>
             }
         }
 
+        // ИСПРАВЛЕНО: сохраняем переносы строк
         function addMessageToChat(message) {
             const messageDiv = document.createElement('div');
             messageDiv.className = `message ${message.username === currentUser ? 'own' : ''}`;
-            messageDiv.innerHTML = `<div class="message-bubble"><div class="message-username">${escapeHtml(message.username)}</div><div class="message-text">${escapeHtml(message.text)}</div><div class="message-time">${formatTime(message.timestamp)}</div></div>`;
+            // Заменяем \\n на <br> для сохранения переносов строк
+            const textWithBreaks = escapeHtml(message.text).replace(/\\n/g, '<br>');
+            messageDiv.innerHTML = `<div class="message-bubble"><div class="message-username">${escapeHtml(message.username)}</div><div class="message-text">${textWithBreaks}</div><div class="message-time">${formatTime(message.timestamp)}</div></div>`;
             messagesContainer.appendChild(messageDiv);
             scrollToBottom();
         }
@@ -392,8 +393,8 @@ HTML_PAGE = '''<!DOCTYPE html>
         }
         
         function sendMessage() { 
-            const text = messageInput.value.trim(); 
-            if (!text || !ws || ws.readyState !== WebSocket.OPEN) return; 
+            const text = messageInput.value;  // Убираем .trim() чтобы сохранить пробелы в начале
+            if (!text.trim() || !ws || ws.readyState !== WebSocket.OPEN) return; 
             ws.send(JSON.stringify({ type: 'message', text: text })); 
             messageInput.value = ''; 
             messageInput.style.height = 'auto';
@@ -403,11 +404,9 @@ HTML_PAGE = '''<!DOCTYPE html>
             } 
         }
         
-        // Enter - перенос строки, НЕ отправка
         function handleKeyDown(event) {
             if (event.key === 'Enter') {
-                event.preventDefault();  // Полностью отключаем отправку
-                // Вставляем перенос строки
+                event.preventDefault();
                 const start = messageInput.selectionStart;
                 const end = messageInput.selectionEnd;
                 const value = messageInput.value;
