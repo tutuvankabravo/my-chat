@@ -332,6 +332,12 @@ HTML_PAGE = '''<!DOCTYPE html>
             order: 1;
         }
         
+        .chat-title h1 {
+            color: var(--accent);
+            font-size: 0.85em;
+            margin: 0;
+        }
+                
         .chat-main {
             display: flex;
             flex: 1;
