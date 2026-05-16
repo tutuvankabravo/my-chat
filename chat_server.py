@@ -7,6 +7,7 @@ from aiohttp import web
 
 # === НАСТРОЙКИ ===
 PORT = int(os.environ.get("PORT", 8080))
+MAX_MESSAGE_LENGTH = 1600  # Максимальная длина одного сообщения
 # =================
 
 # --- Хранилище данных чата ---
@@ -18,6 +19,7 @@ class ChatServer:
     def __init__(self):
         self.clients = {}  # {websocket: {'username': username, 'session_id': session_id}}
         self.user_sessions = {}  # {'username_session': count}
+        self.private_chats = {}  # {frozenset([user1, user2]): {'messages': [], 'participants': set()}}
 
     async def register(self, ws, username, session_id):
         # Сохраняем клиента с его сессией
@@ -77,11 +79,13 @@ class ChatServer:
         
         return [{'name': name, 'sessions': count} for name, count in user_sessions_count.items()]
 
-    async def broadcast(self, message):
+    async def broadcast(self, message, exclude_ws=None):
         if not connected_clients:
             return
         message_json = json.dumps(message)
         for client in list(connected_clients):
+            if exclude_ws and client == exclude_ws:
+                continue
             try:
                 if not client.closed:
                     await client.send_str(message_json)
@@ -96,6 +100,54 @@ class ChatServer:
             'count': len(users_list)
         })
 
+    async def send_private_message(self, from_username, to_username, text, message_id):
+        """Отправка личного сообщения"""
+        message = {
+            'type': 'private_message',
+            'from': from_username,
+            'to': to_username,
+            'text': text,
+            'timestamp': datetime.now().isoformat(),
+            'id': message_id
+        }
+        
+        # Отправляем получателю
+        for ws, client_data in self.clients.items():
+            if client_data['username'] == to_username:
+                try:
+                    if not ws.closed:
+                        await ws.send_str(json.dumps(message))
+                except:
+                    pass
+        
+        # Отправляем отправителю подтверждение
+        for ws, client_data in self.clients.items():
+            if client_data['username'] == from_username:
+                try:
+                    if not ws.closed:
+                        await ws.send_str(json.dumps(message))
+                except:
+                    pass
+
+    async def send_private_message_parts(self, from_username, to_username, text):
+        """Разбивает длинное сообщение на части и отправляет"""
+        message_id = hashlib.md5(f"{from_username}{to_username}{datetime.now()}".encode()).hexdigest()[:8]
+        
+        if len(text) <= MAX_MESSAGE_LENGTH:
+            await self.send_private_message(from_username, to_username, text, message_id)
+            return
+        
+        # Разбиваем сообщение на части
+        parts = []
+        for i in range(0, len(text), MAX_MESSAGE_LENGTH):
+            part = text[i:i+MAX_MESSAGE_LENGTH]
+            parts.append(part)
+        
+        # Отправляем каждую часть
+        for idx, part in enumerate(parts, 1):
+            part_text = f"[{idx}/{len(parts)}] {part}" if len(parts) > 1 else part
+            await self.send_private_message(from_username, to_username, part_text, f"{message_id}_{idx}")
+
     async def handle_message(self, ws, data):
         if ws not in self.clients:
             return
@@ -106,17 +158,48 @@ class ChatServer:
         msg_type = data.get('type', 'message')
 
         if msg_type == 'message':
-            message = {
-                'type': 'message',
-                'username': username,
-                'text': data.get('text', ''),
-                'timestamp': datetime.now().isoformat(),
-                'id': hashlib.md5(f"{username}{datetime.now()}".encode()).hexdigest()[:8]
-            }
-            messages_history.append(message)
-            if len(messages_history) > MAX_HISTORY:
-                messages_history.pop(0)
-            await self.broadcast(message)
+            text = data.get('text', '')
+            message_id = hashlib.md5(f"{username}{datetime.now()}".encode()).hexdigest()[:8]
+            
+            # Разбиваем длинное сообщение на части для общего чата
+            if len(text) <= MAX_MESSAGE_LENGTH:
+                message = {
+                    'type': 'message',
+                    'username': username,
+                    'text': text,
+                    'timestamp': datetime.now().isoformat(),
+                    'id': message_id
+                }
+                messages_history.append(message)
+                if len(messages_history) > MAX_HISTORY:
+                    messages_history.pop(0)
+                await self.broadcast(message)
+            else:
+                # Разбиваем на части
+                parts = []
+                for i in range(0, len(text), MAX_MESSAGE_LENGTH):
+                    part = text[i:i+MAX_MESSAGE_LENGTH]
+                    parts.append(part)
+                
+                for idx, part in enumerate(parts, 1):
+                    part_text = f"[{idx}/{len(parts)}] {part}" if len(parts) > 1 else part
+                    message = {
+                        'type': 'message',
+                        'username': username,
+                        'text': part_text,
+                        'timestamp': datetime.now().isoformat(),
+                        'id': f"{message_id}_{idx}"
+                    }
+                    messages_history.append(message)
+                    if len(messages_history) > MAX_HISTORY:
+                        messages_history.pop(0)
+                    await self.broadcast(message)
+
+        elif msg_type == 'private_message':
+            to_username = data.get('to')
+            text = data.get('text', '')
+            if to_username:
+                await self.send_private_message_parts(username, to_username, text)
 
         elif msg_type == 'typing':
             await self.broadcast({
@@ -149,6 +232,7 @@ HTML_PAGE = '''<!DOCTYPE html>
             --accent: #58a6ff;
             --border: #30363d;
             --success: #238636;
+            --private-chat: #3a4a6e;
         }
         body {
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
@@ -215,7 +299,7 @@ HTML_PAGE = '''<!DOCTYPE html>
         }
         
         .users-sidebar {
-            width: 220px;
+            width: 250px;
             background: var(--bg-secondary);
             border-right: 1px solid var(--border);
             display: none;
@@ -229,17 +313,71 @@ HTML_PAGE = '''<!DOCTYPE html>
         
         .users-header { padding: 10px; border-bottom: 1px solid var(--border); font-weight: bold; background: var(--bg-tertiary); font-size: 0.85em; }
         .users-list { flex: 1; overflow-y: auto; padding: 8px; }
-        .user-item { padding: 6px 10px; margin: 2px 0; border-radius: 8px; display: flex; align-items: center; gap: 8px; font-size: 0.85em; }
+        .user-item { 
+            padding: 8px 10px; 
+            margin: 2px 0; 
+            border-radius: 8px; 
+            display: flex; 
+            align-items: center; 
+            gap: 8px; 
+            font-size: 0.85em;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+        .user-item:hover { background: var(--bg-tertiary); }
         .user-item:active { background: var(--bg-tertiary); }
         .user-avatar { width: 8px; height: 8px; border-radius: 50%; background: var(--success); flex-shrink: 0; }
         .user-name { word-break: break-word; flex: 1; }
         .user-sessions { font-size: 0.7em; color: var(--text-secondary); margin-left: 4px; }
+        .private-badge { font-size: 0.7em; background: var(--private-chat); padding: 2px 6px; border-radius: 10px; margin-left: 5px; }
         
         .messages-area {
             flex: 1;
             display: flex;
             flex-direction: column;
             overflow: hidden;
+        }
+        
+        .chat-tabs {
+            display: flex;
+            gap: 2px;
+            background: var(--bg-secondary);
+            border-bottom: 1px solid var(--border);
+            padding: 5px 10px;
+            overflow-x: auto;
+            flex-shrink: 0;
+        }
+        
+        .chat-tab {
+            padding: 6px 12px;
+            background: var(--bg-tertiary);
+            border: none;
+            color: var(--text-secondary);
+            cursor: pointer;
+            border-radius: 6px;
+            font-size: 0.85em;
+            white-space: nowrap;
+            transition: all 0.2s;
+        }
+        
+        .chat-tab.active {
+            background: var(--accent);
+            color: white;
+        }
+        
+        .chat-tab.private {
+            background: var(--private-chat);
+        }
+        
+        .close-tab {
+            margin-left: 8px;
+            cursor: pointer;
+            font-weight: bold;
+            opacity: 0.7;
+        }
+        
+        .close-tab:hover {
+            opacity: 1;
         }
         
         .messages-container {
@@ -255,6 +393,7 @@ HTML_PAGE = '''<!DOCTYPE html>
         .message.system { justify-content: center; }
         .message.system .message-bubble { background: var(--bg-tertiary); color: var(--text-secondary); font-size: 0.75em; padding: 5px 12px; border-radius: 20px; }
         .message.own { justify-content: flex-end; }
+        .message.private { background: var(--private-chat); }
         .message-bubble { max-width: 80%; padding: 8px 12px; border-radius: 18px; }
         .message:not(.own) .message-bubble { background: var(--bg-tertiary); border-bottom-left-radius: 4px; }
         .message.own .message-bubble { background: var(--accent); border-bottom-right-radius: 4px; }
@@ -280,6 +419,21 @@ HTML_PAGE = '''<!DOCTYPE html>
             max-height: 120px;
             min-height: 40px;
             scrollbar-width: thin;
+        }
+        
+        .char-counter {
+            font-size: 0.7em;
+            color: var(--text-secondary);
+            padding: 5px;
+            text-align: right;
+        }
+        
+        .char-counter.warning {
+            color: orange;
+        }
+        
+        .char-counter.danger {
+            color: red;
         }
         
         .message-input::-webkit-scrollbar {
@@ -362,13 +516,20 @@ HTML_PAGE = '''<!DOCTYPE html>
                 <div class="users-list" id="usersList"><div>Подключение...</div></div>
             </div>
             <div class="messages-area">
+                <div class="chat-tabs" id="chatTabs">
+                    <button class="chat-tab active" onclick="switchChat('main')">💬 Общий чат</button>
+                </div>
                 <div class="messages-container" id="messagesContainer"></div>
+                <div class="char-counter" id="charCounter">0/1600</div>
                 <div class="typing-indicator" id="typingIndicator"></div>
             </div>
         </div>
     </div>
     <script>
         let ws = null, currentUser = null, sessionId = null, typingTimeout = null, isTyping = false, typingUsers = new Set();
+        let currentChat = 'main'; // 'main' или имя пользователя для личного чата
+        let privateChats = new Map(); // {username: messages[]}
+        
         const messagesContainer = document.getElementById('messagesContainer');
         const messageInput = document.getElementById('messageInput');
         const typingIndicator = document.getElementById('typingIndicator');
@@ -377,6 +538,7 @@ HTML_PAGE = '''<!DOCTYPE html>
         const usersCountSpan = document.getElementById('usersCount');
         const usersList = document.getElementById('usersList');
         const usersSidebar = document.getElementById('usersSidebar');
+        const charCounter = document.getElementById('charCounter');
 
         // Генерируем или получаем уникальный ID сессии
         function getSessionId() {
@@ -411,11 +573,115 @@ HTML_PAGE = '''<!DOCTYPE html>
 
         function handleMessage(data) {
             switch(data.type) {
-                case 'message': addMessageToChat(data); break;
-                case 'system': showSystemMessage(data.message); if (data.users_count) updateOnlineCount(data.users_count); break;
-                case 'users_list': updateUsersList(data.users, data.count); break;
-                case 'typing': updateTypingIndicator(data.username, data.is_typing); break;
+                case 'message': 
+                    if (currentChat === 'main') addMessageToChat(data);
+                    break;
+                case 'private_message':
+                    handlePrivateMessage(data);
+                    break;
+                case 'system': 
+                    showSystemMessage(data.message); 
+                    if (data.users_count) updateOnlineCount(data.users_count); 
+                    break;
+                case 'users_list': 
+                    updateUsersList(data.users, data.count); 
+                    break;
+                case 'typing': 
+                    updateTypingIndicator(data.username, data.is_typing); 
+                    break;
             }
+        }
+        
+        function handlePrivateMessage(message) {
+            const isFromMe = message.from === currentUser;
+            const otherUser = isFromMe ? message.to : message.from;
+            
+            // Сохраняем сообщение в приватный чат
+            if (!privateChats.has(otherUser)) {
+                privateChats.set(otherUser, []);
+                addPrivateChatTab(otherUser);
+            }
+            privateChats.get(otherUser).push(message);
+            
+            // Если открыт этот приватный чат, показываем сообщение
+            if (currentChat === otherUser) {
+                addPrivateMessageToChat(message, otherUser);
+            } else {
+                // Показываем уведомление о новом сообщении
+                showNotification(otherUser);
+            }
+        }
+        
+        function addPrivateChatTab(username) {
+            const tabsContainer = document.getElementById('chatTabs');
+            const existingTab = Array.from(tabsContainer.children).find(
+                tab => tab.textContent.includes(username)
+            );
+            if (existingTab) return;
+            
+            const tab = document.createElement('button');
+            tab.className = 'chat-tab private';
+            tab.innerHTML = `💬 ${username} <span class="close-tab" onclick="event.stopPropagation(); closePrivateChat('${username}')">✖</span>`;
+            tab.onclick = () => switchChat(username);
+            tabsContainer.appendChild(tab);
+        }
+        
+        function closePrivateChat(username) {
+            privateChats.delete(username);
+            const tabsContainer = document.getElementById('chatTabs');
+            const tab = Array.from(tabsContainer.children).find(
+                t => t.textContent.includes(username)
+            );
+            if (tab) tab.remove();
+            
+            if (currentChat === username) {
+                switchChat('main');
+            }
+        }
+        
+        function switchChat(chatId) {
+            currentChat = chatId;
+            
+            // Обновляем активную вкладку
+            const tabs = document.querySelectorAll('.chat-tab');
+            tabs.forEach(tab => {
+                if ((chatId === 'main' && tab.textContent.includes('Общий чат')) ||
+                    (chatId !== 'main' && tab.textContent.includes(chatId))) {
+                    tab.classList.add('active');
+                } else {
+                    tab.classList.remove('active');
+                }
+            });
+            
+            // Очищаем и перерисовываем сообщения
+            messagesContainer.innerHTML = '';
+            
+            if (chatId === 'main') {
+                // Показываем общие сообщения из истории
+                window.messagesHistory.forEach(msg => {
+                    if (msg.type === 'message') {
+                        addMessageToChat(msg);
+                    }
+                });
+            } else {
+                // Показываем приватные сообщения
+                const messages = privateChats.get(chatId) || [];
+                messages.forEach(msg => {
+                    addPrivateMessageToChat(msg, chatId);
+                });
+            }
+            scrollToBottom();
+        }
+        
+        function addPrivateMessageToChat(message, otherUser) {
+            const messageDiv = document.createElement('div');
+            const isFromMe = message.from === currentUser;
+            messageDiv.className = `message ${isFromMe ? 'own' : ''} private`;
+            const sender = isFromMe ? 'Вы' : message.from;
+            const textWithBreaks = escapeHtml(message.text).replace(/\\n/g, '<br>');
+            messageDiv.innerHTML = `<div class="message-bubble"><div class="message-username">${escapeHtml(sender)}</div><div class="message-text">${textWithBreaks}</div><div class="message-time">${formatTime(message.timestamp)}</div></div>`;
+            messagesContainer.appendChild(messageDiv);
+            scrollToBottom();
         }
 
         function addMessageToChat(message) {
@@ -428,6 +694,7 @@ HTML_PAGE = '''<!DOCTYPE html>
         }
         
         function showSystemMessage(text) { 
+            if (currentChat !== 'main') return;
             const messageDiv = document.createElement('div'); 
             messageDiv.className = 'message system'; 
             messageDiv.innerHTML = `<div class="message-bubble">${escapeHtml(text)}</div>`; 
@@ -435,16 +702,55 @@ HTML_PAGE = '''<!DOCTYPE html>
             scrollToBottom(); 
         }
         
+        function showNotification(username) {
+            const tabsContainer = document.getElementById('chatTabs');
+            const tab = Array.from(tabsContainer.children).find(
+                t => t.textContent.includes(username)
+            );
+            if (tab && currentChat !== username) {
+                tab.style.background = '#ff9800';
+                setTimeout(() => {
+                    if (currentChat !== username) {
+                        tab.style.background = '';
+                    }
+                }, 1000);
+            }
+        }
+        
         function sendMessage() { 
             const text = messageInput.value;
-            if (!text.trim() || !ws || ws.readyState !== WebSocket.OPEN) return; 
-            ws.send(JSON.stringify({ type: 'message', text: text })); 
+            if (!text.trim() || !ws || ws.readyState !== WebSocket.OPEN) return;
+            
+            if (currentChat === 'main') {
+                ws.send(JSON.stringify({ type: 'message', text: text }));
+            } else {
+                ws.send(JSON.stringify({ 
+                    type: 'private_message', 
+                    to: currentChat, 
+                    text: text 
+                }));
+            }
+            
             messageInput.value = ''; 
             messageInput.style.height = 'auto';
+            updateCharCounter();
             if (isTyping) { 
                 ws.send(JSON.stringify({ type: 'typing', is_typing: false })); 
                 isTyping = false; 
             } 
+        }
+        
+        function startPrivateChat(username) {
+            if (username === currentUser) {
+                showSystemMessage('Нельзя начать чат с самим собой');
+                return;
+            }
+            if (!privateChats.has(username)) {
+                privateChats.set(username, []);
+                addPrivateChatTab(username);
+            }
+            switchChat(username);
+            usersSidebar.classList.remove('show');
         }
         
         function handleKeyDown(event) {
@@ -459,7 +765,20 @@ HTML_PAGE = '''<!DOCTYPE html>
             }
         }
         
+        function updateCharCounter() {
+            const length = messageInput.value.length;
+            charCounter.textContent = `${length}/1600`;
+            if (length > 1400) {
+                charCounter.className = 'char-counter warning';
+            } else if (length > 1600) {
+                charCounter.className = 'char-counter danger';
+            } else {
+                charCounter.className = 'char-counter';
+            }
+        }
+        
         function handleKeyUp(event) {
+            updateCharCounter();
             if (!isTyping && messageInput.value.length > 0 && ws && ws.readyState === WebSocket.OPEN) { 
                 isTyping = true; 
                 ws.send(JSON.stringify({ type: 'typing', is_typing: true })); 
@@ -485,7 +804,9 @@ HTML_PAGE = '''<!DOCTYPE html>
                 if (user.sessions > 1) {
                     sessionsHtml = `<span class="user-sessions">📱 ${user.sessions} вкладки</span>`;
                 }
-                return `<div class="user-item"><div class="user-avatar"></div><div class="user-name">${escapeHtml(user.name)} ${user.name === currentUser ? '(Вы)' : ''}${sessionsHtml}</div></div>`;
+                const isCurrent = user.name === currentUser;
+                const onClick = isCurrent ? '' : `onclick="startPrivateChat('${escapeHtml(user.name)}')"`;
+                return `<div class="user-item" ${onClick}><div class="user-avatar"></div><div class="user-name">${escapeHtml(user.name)} ${isCurrent ? '(Вы)' : ''}${sessionsHtml}</div>${!isCurrent ? '<span class="private-badge">💬</span>' : ''}</div>`;
             }).join(''); 
         }
         
@@ -495,6 +816,7 @@ HTML_PAGE = '''<!DOCTYPE html>
         }
         
         function updateTypingIndicator(username, isTypingUser) { 
+            if (currentChat !== 'main') return;
             if (isTypingUser && username !== currentUser) typingUsers.add(username); 
             else typingUsers.delete(username); 
             if (typingUsers.size > 0) { 
@@ -545,9 +867,22 @@ HTML_PAGE = '''<!DOCTYPE html>
             localStorage.setItem('chat_username', currentUser); 
         }
         currentUsernameSpan.textContent = currentUser;
+        
+        // Сохраняем историю сообщений
+        window.messagesHistory = [];
+        const originalAddMessage = addMessageToChat;
+        window.addMessageToChat = function(message) {
+            window.messagesHistory.push(message);
+            if (window.messagesHistory.length > 100) window.messagesHistory.shift();
+            originalAddMessage(message);
+        };
+        
         connect(currentUser, sessionId);
         
-        messageInput.addEventListener('input', autoResizeTextarea);
+        messageInput.addEventListener('input', (e) => {
+            autoResizeTextarea.call(messageInput);
+            updateCharCounter();
+        });
         messageInput.addEventListener('keydown', handleKeyDown);
         messageInput.addEventListener('keyup', handleKeyUp);
         
