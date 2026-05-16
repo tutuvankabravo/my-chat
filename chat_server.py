@@ -272,7 +272,7 @@ HTML_PAGE = '''<!DOCTYPE html>
 # === HTTP ОБРАБОТЧИК ===
 async def handle_index(request):
     """Отдает HTML страницу чата"""
-    return web.Response(text=HTML_PAGE, content_type='text/html', charset='utf-8')
+    return web.Response(text=HTML_PAGE, content_type='text/html')
 
 async def websocket_handler(request):
     """Обработчик WebSocket соединений"""
