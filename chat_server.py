@@ -228,14 +228,14 @@ HTML_PAGE = '''<!DOCTYPE html>
         .message-time { font-size: 0.6em; opacity: 0.7; margin-top: 3px; text-align: right; }
         .typing-indicator { padding: 6px 16px; font-size: 0.75em; color: var(--text-secondary); font-style: italic; min-height: 32px; background: var(--bg-primary); flex-shrink: 0; }
         
-        /* ПОЛЕ ВВОДА С ПОЛЗУНКОМ ВНУТРИ */
+        /* ПОЛЕ ВВОДА - МИНИМАЛЬНЫЕ СКРУГЛЕНИЯ (8px вместо 25px) */
         .message-input {
             flex: 1;
             background: var(--bg-tertiary);
             border: 1px solid var(--border);
             color: var(--text-primary);
             padding: 10px 14px;
-            border-radius: 25px;
+            border-radius: 8px;  /* Уменьшил скругление */
             font-size: 0.9em;
             font-family: inherit;
             outline: none;
@@ -248,23 +248,19 @@ HTML_PAGE = '''<!DOCTYPE html>
             scrollbar-width: thin;
         }
         
-        /* Красивый ползунок */
+        /* Стили для ползунка */
         .message-input::-webkit-scrollbar {
             width: 4px;
         }
         
         .message-input::-webkit-scrollbar-track {
             background: var(--bg-secondary);
-            border-radius: 10px;
+            border-radius: 4px;
         }
         
         .message-input::-webkit-scrollbar-thumb {
             background: var(--accent);
-            border-radius: 10px;
-        }
-        
-        .message-input::-webkit-scrollbar-thumb:hover {
-            background: var(--text-secondary);
+            border-radius: 4px;
         }
         
         .message-input:focus { border-color: var(--accent); }
@@ -274,7 +270,7 @@ HTML_PAGE = '''<!DOCTYPE html>
             color: white;
             border: none;
             padding: 0 20px;
-            border-radius: 25px;
+            border-radius: 8px;  /* Тоже уменьшил скругление */
             cursor: pointer;
             font-weight: bold;
             font-size: 0.85em;
@@ -292,8 +288,8 @@ HTML_PAGE = '''<!DOCTYPE html>
         @media (max-width: 768px) {
             .message-bubble { max-width: 85%; }
             .input-area { padding: 8px 12px; padding-top: max(8px, env(safe-area-inset-top)); }
-            .message-input { padding: 8px 12px; font-size: 0.85em; }
-            .send-btn { padding: 0 16px; }
+            .message-input { padding: 8px 12px; font-size: 0.85em; border-radius: 6px; }
+            .send-btn { padding: 0 16px; border-radius: 6px; }
             .chat-header { padding: 6px 10px; }
         }
         
@@ -407,7 +403,21 @@ HTML_PAGE = '''<!DOCTYPE html>
             } 
         }
         
-        function handleKeyPress(event) {
+        // Enter - перенос строки, НЕ отправка
+        function handleKeyDown(event) {
+            if (event.key === 'Enter') {
+                event.preventDefault();  // Полностью отключаем отправку
+                // Вставляем перенос строки
+                const start = messageInput.selectionStart;
+                const end = messageInput.selectionEnd;
+                const value = messageInput.value;
+                messageInput.value = value.substring(0, start) + '\\n' + value.substring(end);
+                messageInput.selectionStart = messageInput.selectionEnd = start + 1;
+                messageInput.dispatchEvent(new Event('input'));
+            }
+        }
+        
+        function handleKeyUp(event) {
             if (!isTyping && messageInput.value.length > 0 && ws && ws.readyState === WebSocket.OPEN) { 
                 isTyping = true; 
                 ws.send(JSON.stringify({ type: 'typing', is_typing: true })); 
@@ -488,7 +498,8 @@ HTML_PAGE = '''<!DOCTYPE html>
         connect(currentUser);
         
         messageInput.addEventListener('input', autoResizeTextarea);
-        messageInput.addEventListener('keyup', handleKeyPress);
+        messageInput.addEventListener('keydown', handleKeyDown);
+        messageInput.addEventListener('keyup', handleKeyUp);
         
         messageInput.focus();
         
