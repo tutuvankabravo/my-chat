@@ -99,12 +99,13 @@ class ChatServer:
 
 chat_processor = ChatServer()
 
-# --- Встроенный HTML (упрощенный, но с корректным WebSocket URL) ---
+# --- Встроенный HTML (полностью адаптированный под телефоны) ---
 HTML_PAGE = '''<!DOCTYPE html>
 <html lang="ru">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <meta name="theme-color" content="#0d1117">
     <title>💬 Веб-чат</title>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -124,65 +125,123 @@ HTML_PAGE = '''<!DOCTYPE html>
             color: var(--text-primary);
             height: 100vh;
             overflow: hidden;
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
         }
         .chat-container {
             display: flex;
             flex-direction: column;
             height: 100vh;
+            height: -webkit-fill-available;
             max-width: 1400px;
             margin: 0 auto;
         }
         .chat-header {
             background: var(--bg-secondary);
             border-bottom: 1px solid var(--border);
-            padding: 15px 20px;
+            padding: 12px 16px;
             display: flex;
             justify-content: space-between;
             align-items: center;
             flex-wrap: wrap;
-            gap: 10px;
+            gap: 8px;
+            flex-shrink: 0;
         }
-        .chat-title h1 { color: var(--accent); font-size: 1.3em; }
-        .online-status { background: var(--success); color: white; padding: 4px 10px; border-radius: 20px; font-size: 0.8em; }
-        .username-display { background: var(--bg-tertiary); padding: 5px 12px; border-radius: 20px; font-size: 0.9em; }
-        .change-name-btn { background: var(--bg-tertiary); border: 1px solid var(--border); color: var(--text-primary); padding: 5px 12px; border-radius: 20px; cursor: pointer; }
-        .change-name-btn:hover { background: var(--accent); }
-        .chat-main { display: flex; flex: 1; overflow: hidden; }
+        .chat-title h1 { color: var(--accent); font-size: 1.2em; }
+        .online-status { background: var(--success); color: white; padding: 4px 8px; border-radius: 20px; font-size: 0.75em; }
+        .username-display { background: var(--bg-tertiary); padding: 4px 10px; border-radius: 20px; font-size: 0.85em; }
+        .change-name-btn { background: var(--bg-tertiary); border: 1px solid var(--border); color: var(--text-primary); padding: 4px 10px; border-radius: 20px; cursor: pointer; font-size: 0.8em; }
+        .change-name-btn:active { background: var(--accent); }
+        .chat-main { display: flex; flex: 1; overflow: hidden; min-height: 0; }
         .users-sidebar {
-            width: 250px;
+            width: 200px;
             background: var(--bg-secondary);
             border-right: 1px solid var(--border);
             display: flex;
             flex-direction: column;
+            overflow: hidden;
         }
-        .users-header { padding: 15px; border-bottom: 1px solid var(--border); font-weight: bold; background: var(--bg-tertiary); }
-        .users-list { flex: 1; overflow-y: auto; padding: 10px; }
-        .user-item { padding: 8px 12px; margin: 4px 0; border-radius: 8px; display: flex; align-items: center; gap: 8px; }
-        .user-item:hover { background: var(--bg-tertiary); }
+        .users-header { padding: 12px; border-bottom: 1px solid var(--border); font-weight: bold; background: var(--bg-tertiary); font-size: 0.85em; }
+        .users-list { flex: 1; overflow-y: auto; padding: 8px; }
+        .user-item { padding: 6px 10px; margin: 2px 0; border-radius: 8px; display: flex; align-items: center; gap: 8px; font-size: 0.85em; }
+        .user-item:active { background: var(--bg-tertiary); }
         .user-avatar { width: 8px; height: 8px; border-radius: 50%; background: var(--success); }
-        .messages-area { flex: 1; display: flex; flex-direction: column; }
-        .messages-container { flex: 1; overflow-y: auto; padding: 20px; display: flex; flex-direction: column; gap: 12px; }
+        .messages-area { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+        .messages-container { flex: 1; overflow-y: auto; padding: 12px; display: flex; flex-direction: column; gap: 10px; }
         .message { display: flex; animation: fadeIn 0.3s ease; }
         .message.system { justify-content: center; }
-        .message.system .message-bubble { background: var(--bg-tertiary); color: var(--text-secondary); font-size: 0.85em; padding: 6px 15px; border-radius: 20px; }
+        .message.system .message-bubble { background: var(--bg-tertiary); color: var(--text-secondary); font-size: 0.75em; padding: 5px 12px; border-radius: 20px; }
         .message.own { justify-content: flex-end; }
-        .message-bubble { max-width: 70%; padding: 10px 15px; border-radius: 18px; }
+        .message-bubble { max-width: 80%; padding: 8px 12px; border-radius: 18px; }
         .message:not(.own) .message-bubble { background: var(--bg-tertiary); border-bottom-left-radius: 4px; }
         .message.own .message-bubble { background: var(--accent); border-bottom-right-radius: 4px; }
-        .message-username { font-size: 0.75em; font-weight: bold; margin-bottom: 4px; color: var(--accent); }
-        .message-text { font-size: 0.95em; word-wrap: break-word; }
-        .message-time { font-size: 0.7em; opacity: 0.7; margin-top: 4px; text-align: right; }
-        .typing-indicator { padding: 8px 20px; font-size: 0.85em; color: var(--text-secondary); font-style: italic; min-height: 36px; }
-        .input-area { background: var(--bg-secondary); border-top: 1px solid var(--border); padding: 15px 20px; display: flex; gap: 10px; }
-        .message-input { flex: 1; background: var(--bg-tertiary); border: 1px solid var(--border); color: var(--text-primary); padding: 12px 15px; border-radius: 25px; resize: none; font-family: inherit; outline: none; }
+        .message-username { font-size: 0.7em; font-weight: bold; margin-bottom: 3px; color: var(--accent); }
+        .message-text { font-size: 0.85em; word-wrap: break-word; }
+        .message-time { font-size: 0.6em; opacity: 0.7; margin-top: 3px; text-align: right; }
+        .typing-indicator { padding: 6px 16px; font-size: 0.75em; color: var(--text-secondary); font-style: italic; min-height: 32px; background: var(--bg-primary); flex-shrink: 0; }
+        .input-area {
+            background: var(--bg-secondary);
+            border-top: 1px solid var(--border);
+            padding: 10px 12px;
+            padding-bottom: max(10px, env(safe-area-inset-bottom));
+            display: flex;
+            gap: 8px;
+            flex-shrink: 0;
+        }
+        .message-input {
+            flex: 1;
+            background: var(--bg-tertiary);
+            border: 1px solid var(--border);
+            color: var(--text-primary);
+            padding: 10px 14px;
+            border-radius: 25px;
+            font-size: 0.9em;
+            resize: none;
+            font-family: inherit;
+            outline: none;
+        }
         .message-input:focus { border-color: var(--accent); }
-        .send-btn { background: var(--accent); color: white; border: none; padding: 0 25px; border-radius: 25px; cursor: pointer; font-weight: bold; }
-        .send-btn:hover { background: #1f6feb; transform: scale(1.02); }
-        @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
-        @media (max-width: 768px) { .users-sidebar { display: none; } .message-bubble { max-width: 85%; } }
-        ::-webkit-scrollbar { width: 8px; }
+        .send-btn {
+            background: var(--accent);
+            color: white;
+            border: none;
+            padding: 0 20px;
+            border-radius: 25px;
+            cursor: pointer;
+            font-weight: bold;
+            font-size: 0.85em;
+            white-space: nowrap;
+        }
+        .send-btn:active { background: #1f6feb; transform: scale(0.98); }
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+        
+        /* Мобильная адаптация */
+        @media (max-width: 768px) {
+            .users-sidebar { display: none; }
+            .message-bubble { max-width: 85%; }
+            .chat-header { padding: 10px 12px; }
+            .messages-container { padding: 10px; }
+            .input-area { padding: 8px 12px; padding-bottom: max(8px, env(safe-area-inset-bottom)); }
+            .message-input { padding: 8px 12px; font-size: 0.85em; }
+            .send-btn { padding: 0 16px; }
+        }
+        
+        /* Для телефонов с вырезом и панелью кнопок */
+        @supports (padding-bottom: env(safe-area-inset-bottom)) {
+            .input-area {
+                padding-bottom: max(10px, env(safe-area-inset-bottom));
+            }
+            body {
+                padding-top: env(safe-area-inset-top);
+            }
+        }
+        
+        ::-webkit-scrollbar { width: 6px; }
         ::-webkit-scrollbar-track { background: var(--bg-primary); }
-        ::-webkit-scrollbar-thumb { background: var(--bg-tertiary); border-radius: 4px; }
+        ::-webkit-scrollbar-thumb { background: var(--bg-tertiary); border-radius: 3px; }
     </style>
 </head>
 <body>
@@ -193,7 +252,14 @@ HTML_PAGE = '''<!DOCTYPE html>
         </div>
         <div class="chat-main">
             <div class="users-sidebar"><div class="users-header">👥 Участники (<span id="usersCount">0</span>)</div><div class="users-list" id="usersList"><div>Подключение...</div></div></div>
-            <div class="messages-area"><div class="messages-container" id="messagesContainer"></div><div class="typing-indicator" id="typingIndicator"></div><div class="input-area"><textarea id="messageInput" class="message-input" placeholder="Введите сообщение..." rows="1" onkeypress="handleKeyPress(event)"></textarea><button class="send-btn" onclick="sendMessage()">📨 Отправить</button></div></div>
+            <div class="messages-area">
+                <div class="messages-container" id="messagesContainer"></div>
+                <div class="typing-indicator" id="typingIndicator"></div>
+                <div class="input-area">
+                    <textarea id="messageInput" class="message-input" placeholder="Введите сообщение..." rows="1" onkeypress="handleKeyPress(event)"></textarea>
+                    <button class="send-btn" onclick="sendMessage()">📨 Отправить</button>
+                </div>
+            </div>
         </div>
     </div>
     <script>
@@ -249,6 +315,15 @@ HTML_PAGE = '''<!DOCTYPE html>
         else { currentUser = prompt('Ваше имя:', 'Гость') || `Гость_${Math.floor(Math.random() * 1000)}`; localStorage.setItem('chat_username', currentUser); }
         currentUsernameSpan.textContent = currentUser;
         connect(currentUser);
+        
+        // Автоматическая подстройка высоты textarea
+        messageInput.addEventListener('input', function() {
+            this.style.height = 'auto';
+            this.style.height = Math.min(this.scrollHeight, 80) + 'px';
+        });
+        
+        // Фокус на поле ввода при загрузке
+        messageInput.focus();
     </script>
 </body>
 </html>'''
