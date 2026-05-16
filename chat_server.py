@@ -22,7 +22,6 @@ class ChatServer:
         self.clients[ws] = username
         connected_clients.add(ws)
 
-        # Отправляем историю новому пользователю
         for msg in messages_history[-50:]:
             try:
                 await ws.send_str(json.dumps(msg))
@@ -99,7 +98,6 @@ class ChatServer:
 
 chat_processor = ChatServer()
 
-# --- Встроенный HTML (с полем ввода СВЕРХУ для удобства на телефонах) ---
 HTML_PAGE = '''<!DOCTYPE html>
 <html lang="ru">
 <head>
@@ -140,7 +138,6 @@ HTML_PAGE = '''<!DOCTYPE html>
             margin: 0 auto;
         }
         
-        /* ПОЛЕ ВВОДА СВЕРХУ (как в Telegram) */
         .input-area {
             background: var(--bg-secondary);
             border-bottom: 1px solid var(--border);
@@ -174,7 +171,6 @@ HTML_PAGE = '''<!DOCTYPE html>
             flex-direction: column;
         }
         
-        /* Переключатель показа списка пользователей */
         .toggle-users-btn {
             background: var(--bg-tertiary);
             border: 1px solid var(--border);
@@ -183,10 +179,6 @@ HTML_PAGE = '''<!DOCTYPE html>
             border-radius: 20px;
             cursor: pointer;
             font-size: 0.8em;
-        }
-        
-        .chat-main.with-sidebar {
-            flex-direction: row;
         }
         
         .users-sidebar {
@@ -234,8 +226,9 @@ HTML_PAGE = '''<!DOCTYPE html>
         .message-username { font-size: 0.7em; font-weight: bold; margin-bottom: 3px; color: var(--accent); }
         .message-text { font-size: 0.85em; word-wrap: break-word; }
         .message-time { font-size: 0.6em; opacity: 0.7; margin-top: 3px; text-align: right; }
-        .typing-indicator { padding: 6px 16px; font-size: 0.75em; color: var(--text-secondary); font-style: italic; min-height: 32px; background: var(--bg-primary); flex-shrink: 0; order: 3; }
+        .typing-indicator { padding: 6px 16px; font-size: 0.75em; color: var(--text-secondary); font-style: italic; min-height: 32px; background: var(--bg-primary); flex-shrink: 0; }
         
+        /* ПОЛЕ ВВОДА С ПОЛЗУНКОМ ВНУТРИ */
         .message-input {
             flex: 1;
             background: var(--bg-tertiary);
@@ -244,10 +237,36 @@ HTML_PAGE = '''<!DOCTYPE html>
             padding: 10px 14px;
             border-radius: 25px;
             font-size: 0.9em;
-            resize: none;
             font-family: inherit;
             outline: none;
+            resize: none;
+            overflow-y: auto;
+            overflow-x: hidden;
+            line-height: 1.4;
+            max-height: 120px;
+            min-height: 40px;
+            scrollbar-width: thin;
         }
+        
+        /* Красивый ползунок */
+        .message-input::-webkit-scrollbar {
+            width: 4px;
+        }
+        
+        .message-input::-webkit-scrollbar-track {
+            background: var(--bg-secondary);
+            border-radius: 10px;
+        }
+        
+        .message-input::-webkit-scrollbar-thumb {
+            background: var(--accent);
+            border-radius: 10px;
+        }
+        
+        .message-input::-webkit-scrollbar-thumb:hover {
+            background: var(--text-secondary);
+        }
+        
         .message-input:focus { border-color: var(--accent); }
         
         .send-btn {
@@ -270,7 +289,6 @@ HTML_PAGE = '''<!DOCTYPE html>
         
         @keyframes fadeIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
         
-        /* Мобильная адаптация */
         @media (max-width: 768px) {
             .message-bubble { max-width: 85%; }
             .input-area { padding: 8px 12px; padding-top: max(8px, env(safe-area-inset-top)); }
@@ -279,7 +297,6 @@ HTML_PAGE = '''<!DOCTYPE html>
             .chat-header { padding: 6px 10px; }
         }
         
-        /* Для телефонов с вырезом сверху */
         @supports (padding-top: env(safe-area-inset-top)) {
             .input-area {
                 padding-top: max(10px, env(safe-area-inset-top));
@@ -293,9 +310,8 @@ HTML_PAGE = '''<!DOCTYPE html>
 </head>
 <body>
     <div class="chat-container">
-        <!-- ПОЛЕ ВВОДА ТЕПЕРЬ СВЕРХУ -->
         <div class="input-area">
-            <textarea id="messageInput" class="message-input" placeholder="Введите сообщение..." rows="1" onkeypress="handleKeyPress(event)"></textarea>
+            <textarea id="messageInput" class="message-input" placeholder="Введите сообщение..."></textarea>
             <button class="send-btn" onclick="sendMessage()">📨 Отправить</button>
         </div>
         
@@ -391,11 +407,7 @@ HTML_PAGE = '''<!DOCTYPE html>
             } 
         }
         
-        function handleKeyPress(event) { 
-            if (event.key === 'Enter' && !event.shiftKey) { 
-                event.preventDefault(); 
-                sendMessage(); 
-            } 
+        function handleKeyPress(event) {
             if (!isTyping && messageInput.value.length > 0 && ws && ws.readyState === WebSocket.OPEN) { 
                 isTyping = true; 
                 ws.send(JSON.stringify({ type: 'typing', is_typing: true })); 
@@ -406,7 +418,7 @@ HTML_PAGE = '''<!DOCTYPE html>
                     isTyping = false; 
                     ws.send(JSON.stringify({ type: 'typing', is_typing: false })); 
                 } 
-            }, 1000); 
+            }, 1000);
         }
         
         function updateUsersList(users, count) { 
@@ -459,8 +471,13 @@ HTML_PAGE = '''<!DOCTYPE html>
         function scrollToBottom() { 
             messagesContainer.scrollTop = messagesContainer.scrollHeight; 
         }
+        
+        function autoResizeTextarea() {
+            this.style.height = 'auto';
+            const newHeight = Math.min(this.scrollHeight, 120);
+            this.style.height = newHeight + 'px';
+        }
 
-        // Загрузка сохраненного имени
         const saved = localStorage.getItem('chat_username');
         if (saved) currentUser = saved;
         else { 
@@ -470,16 +487,11 @@ HTML_PAGE = '''<!DOCTYPE html>
         currentUsernameSpan.textContent = currentUser;
         connect(currentUser);
         
-        // Автоматическая подстройка высоты textarea
-        messageInput.addEventListener('input', function() {
-            this.style.height = 'auto';
-            this.style.height = Math.min(this.scrollHeight, 80) + 'px';
-        });
+        messageInput.addEventListener('input', autoResizeTextarea);
+        messageInput.addEventListener('keyup', handleKeyPress);
         
-        // Фокус на поле ввода
         messageInput.focus();
         
-        // Закрыть список пользователей при клике вне его (для телефонов)
         document.addEventListener('click', function(event) {
             if (usersSidebar.classList.contains('show')) {
                 const toggleBtn = document.querySelector('.toggle-users-btn');
@@ -492,7 +504,7 @@ HTML_PAGE = '''<!DOCTYPE html>
 </body>
 </html>'''
 
-# --- HTTP и WebSocket обработчики (на одном порту) ---
+# --- HTTP и WebSocket обработчики ---
 async def handle_index(request):
     return web.Response(text=HTML_PAGE, content_type='text/html')
 
@@ -501,7 +513,6 @@ async def websocket_handler(request):
     await ws.prepare(request)
 
     try:
-        # Первое сообщение — имя пользователя
         msg = await ws.receive()
         if msg.type != web.WSMsgType.TEXT:
             await ws.close()
@@ -515,7 +526,6 @@ async def websocket_handler(request):
 
         await chat_processor.register(ws, username)
 
-        # Обработка последующих сообщений
         async for msg in ws:
             if msg.type == web.WSMsgType.TEXT:
                 try:
@@ -535,7 +545,6 @@ async def websocket_handler(request):
 async def health_check(request):
     return web.Response(text="OK")
 
-# --- Запуск приложения ---
 app = web.Application()
 app.router.add_get('/', handle_index)
 app.router.add_get('/ws', websocket_handler)
