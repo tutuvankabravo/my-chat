@@ -16,36 +16,66 @@ connected_clients = set()
 
 class ChatServer:
     def __init__(self):
-        self.clients = {}  # {websocket: username}
+        self.clients = {}  # {websocket: {'username': username, 'session_id': session_id}}
+        self.user_sessions = {}  # {'username_session': count}
 
-    async def register(self, ws, username):
-        self.clients[ws] = username
+    async def register(self, ws, username, session_id):
+        # Сохраняем клиента с его сессией
+        self.clients[ws] = {'username': username, 'session_id': session_id}
         connected_clients.add(ws)
+        
+        # Увеличиваем счетчик сессий для этого пользователя
+        session_key = f"{username}_{session_id}"
+        self.user_sessions[session_key] = self.user_sessions.get(session_key, 0) + 1
 
+        # Отправляем историю новому пользователю
         for msg in messages_history[-50:]:
             try:
                 await ws.send_str(json.dumps(msg))
             except:
                 pass
 
-        await self.broadcast({
-            'type': 'system',
-            'message': f'👋 {username} присоединился к чату',
-            'users_count': len(self.clients)
-        })
+        # Если это первая сессия пользователя, показываем вход
+        if self.user_sessions[session_key] == 1:
+            await self.broadcast({
+                'type': 'system',
+                'message': f'👋 {username} присоединился к чату',
+                'users_count': len(self.get_unique_users())
+            })
+        
         await self.broadcast_users_list()
 
     async def unregister(self, ws):
         if ws in self.clients:
-            username = self.clients[ws]
+            client_data = self.clients[ws]
+            username = client_data['username']
+            session_id = client_data['session_id']
+            session_key = f"{username}_{session_id}"
+            
             del self.clients[ws]
             connected_clients.discard(ws)
-            await self.broadcast({
-                'type': 'system',
-                'message': f'👋 {username} покинул чат',
-                'users_count': len(self.clients)
-            })
+            
+            # Уменьшаем счетчик сессий
+            self.user_sessions[session_key] = self.user_sessions.get(session_key, 1) - 1
+            if self.user_sessions[session_key] <= 0:
+                del self.user_sessions[session_key]
+                # Если это была последняя сессия пользователя, показываем выход
+                await self.broadcast({
+                    'type': 'system',
+                    'message': f'👋 {username} покинул чат',
+                    'users_count': len(self.get_unique_users())
+                })
+            
             await self.broadcast_users_list()
+
+    def get_unique_users(self):
+        """Возвращает уникальных пользователей с количеством их сессий"""
+        user_sessions_count = {}
+        for client_data in self.clients.values():
+            username = client_data['username']
+            user_sessions_count[username] = user_sessions_count.get(username, 0) + 1
+        
+        return [{'name': name, 'sessions': count} for name, count in user_sessions_count.items()]
 
     async def broadcast(self, message):
         if not connected_clients:
@@ -59,7 +89,7 @@ class ChatServer:
                 pass
 
     async def broadcast_users_list(self):
-        users_list = list(self.clients.values())
+        users_list = self.get_unique_users()
         await self.broadcast({
             'type': 'users_list',
             'users': users_list,
@@ -67,9 +97,11 @@ class ChatServer:
         })
 
     async def handle_message(self, ws, data):
-        username = self.clients.get(ws)
-        if not username:
+        if ws not in self.clients:
             return
+        
+        client_data = self.clients[ws]
+        username = client_data['username']
 
         msg_type = data.get('type', 'message')
 
@@ -98,6 +130,7 @@ class ChatServer:
 
 chat_processor = ChatServer()
 
+# --- Встроенный HTML (полностью адаптированный) ---
 HTML_PAGE = '''<!DOCTYPE html>
 <html lang="ru">
 <head>
@@ -182,7 +215,7 @@ HTML_PAGE = '''<!DOCTYPE html>
         }
         
         .users-sidebar {
-            width: 200px;
+            width: 220px;
             background: var(--bg-secondary);
             border-right: 1px solid var(--border);
             display: none;
@@ -198,7 +231,9 @@ HTML_PAGE = '''<!DOCTYPE html>
         .users-list { flex: 1; overflow-y: auto; padding: 8px; }
         .user-item { padding: 6px 10px; margin: 2px 0; border-radius: 8px; display: flex; align-items: center; gap: 8px; font-size: 0.85em; }
         .user-item:active { background: var(--bg-tertiary); }
-        .user-avatar { width: 8px; height: 8px; border-radius: 50%; background: var(--success); }
+        .user-avatar { width: 8px; height: 8px; border-radius: 50%; background: var(--success); flex-shrink: 0; }
+        .user-name { word-break: break-word; flex: 1; }
+        .user-sessions { font-size: 0.7em; color: var(--text-secondary); margin-left: 4px; }
         
         .messages-area {
             flex: 1;
@@ -333,7 +368,7 @@ HTML_PAGE = '''<!DOCTYPE html>
         </div>
     </div>
     <script>
-        let ws = null, currentUser = null, typingTimeout = null, isTyping = false, typingUsers = new Set();
+        let ws = null, currentUser = null, sessionId = null, typingTimeout = null, isTyping = false, typingUsers = new Set();
         const messagesContainer = document.getElementById('messagesContainer');
         const messageInput = document.getElementById('messageInput');
         const typingIndicator = document.getElementById('typingIndicator');
@@ -343,25 +378,35 @@ HTML_PAGE = '''<!DOCTYPE html>
         const usersList = document.getElementById('usersList');
         const usersSidebar = document.getElementById('usersSidebar');
 
+        // Генерируем или получаем уникальный ID сессии
+        function getSessionId() {
+            let id = localStorage.getItem('chat_session_id');
+            if (!id) {
+                id = 'session_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
+                localStorage.setItem('chat_session_id', id);
+            }
+            return id;
+        }
+
         function toggleUsers() {
             usersSidebar.classList.toggle('show');
         }
 
-        function connect(username) {
+        function connect(username, sessionId) {
             const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
             const wsUrl = `${wsProtocol}//${window.location.host}/ws`;
             ws = new WebSocket(wsUrl);
 
             ws.onopen = () => {
                 console.log('Connected');
-                ws.send(JSON.stringify({ username: username }));
+                ws.send(JSON.stringify({ username: username, session_id: sessionId }));
                 setInterval(() => {
                     if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'ping' }));
                 }, 30000);
             };
             ws.onmessage = (event) => { const data = JSON.parse(event.data); handleMessage(data); };
             ws.onerror = (error) => console.error('WebSocket error:', error);
-            ws.onclose = () => { console.log('Disconnected'); showSystemMessage('Соединение потеряно. Переподключение...'); setTimeout(() => { if (currentUser) connect(currentUser); }, 3000); };
+            ws.onclose = () => { console.log('Disconnected'); showSystemMessage('Соединение потеряно. Переподключение...'); setTimeout(() => { if (currentUser) connect(currentUser, sessionId); }, 3000); };
         }
 
         function handleMessage(data) {
@@ -373,11 +418,9 @@ HTML_PAGE = '''<!DOCTYPE html>
             }
         }
 
-        // ИСПРАВЛЕНО: сохраняем переносы строк
         function addMessageToChat(message) {
             const messageDiv = document.createElement('div');
             messageDiv.className = `message ${message.username === currentUser ? 'own' : ''}`;
-            // Заменяем \\n на <br> для сохранения переносов строк
             const textWithBreaks = escapeHtml(message.text).replace(/\\n/g, '<br>');
             messageDiv.innerHTML = `<div class="message-bubble"><div class="message-username">${escapeHtml(message.username)}</div><div class="message-text">${textWithBreaks}</div><div class="message-time">${formatTime(message.timestamp)}</div></div>`;
             messagesContainer.appendChild(messageDiv);
@@ -393,7 +436,7 @@ HTML_PAGE = '''<!DOCTYPE html>
         }
         
         function sendMessage() { 
-            const text = messageInput.value;  // Убираем .trim() чтобы сохранить пробелы в начале
+            const text = messageInput.value;
             if (!text.trim() || !ws || ws.readyState !== WebSocket.OPEN) return; 
             ws.send(JSON.stringify({ type: 'message', text: text })); 
             messageInput.value = ''; 
@@ -437,7 +480,13 @@ HTML_PAGE = '''<!DOCTYPE html>
                 usersList.innerHTML = '<div>Нет пользователей</div>'; 
                 return; 
             } 
-            usersList.innerHTML = users.map(user => `<div class="user-item"><div class="user-avatar"></div><div class="user-name">${escapeHtml(user)} ${user === currentUser ? '(Вы)' : ''}</div></div>`).join(''); 
+            usersList.innerHTML = users.map(user => {
+                let sessionsHtml = '';
+                if (user.sessions > 1) {
+                    sessionsHtml = `<span class="user-sessions">📱 ${user.sessions} вкладки</span>`;
+                }
+                return `<div class="user-item"><div class="user-avatar"></div><div class="user-name">${escapeHtml(user.name)} ${user.name === currentUser ? '(Вы)' : ''}${sessionsHtml}</div></div>`;
+            }).join(''); 
         }
         
         function updateOnlineCount(count) { 
@@ -460,9 +509,9 @@ HTML_PAGE = '''<!DOCTYPE html>
             if (newName && newName.trim() && newName.trim() !== currentUser) { 
                 currentUser = newName.trim().substring(0, 20); 
                 currentUsernameSpan.textContent = currentUser; 
-                localStorage.setItem('chat_username', currentUser); 
+                localStorage.setItem('chat_username', currentUser);
                 if (ws) ws.close(); 
-                setTimeout(() => connect(currentUser), 100); 
+                setTimeout(() => connect(currentUser, sessionId), 100); 
             } 
         }
         
@@ -487,6 +536,8 @@ HTML_PAGE = '''<!DOCTYPE html>
             this.style.height = newHeight + 'px';
         }
 
+        // Инициализация
+        sessionId = getSessionId();
         const saved = localStorage.getItem('chat_username');
         if (saved) currentUser = saved;
         else { 
@@ -494,7 +545,7 @@ HTML_PAGE = '''<!DOCTYPE html>
             localStorage.setItem('chat_username', currentUser); 
         }
         currentUsernameSpan.textContent = currentUser;
-        connect(currentUser);
+        connect(currentUser, sessionId);
         
         messageInput.addEventListener('input', autoResizeTextarea);
         messageInput.addEventListener('keydown', handleKeyDown);
@@ -530,11 +581,16 @@ async def websocket_handler(request):
 
         data = json.loads(msg.data)
         username = data.get('username', '').strip()
+        session_id = data.get('session_id', '')
+        
         if not username:
             username = f"Гость_{hashlib.md5(str(datetime.now()).encode()).hexdigest()[:6]}"
         username = username[:20]
+        
+        if not session_id:
+            session_id = f"session_{datetime.now().timestamp()}"
 
-        await chat_processor.register(ws, username)
+        await chat_processor.register(ws, username, session_id)
 
         async for msg in ws:
             if msg.type == web.WSMsgType.TEXT:
@@ -555,6 +611,7 @@ async def websocket_handler(request):
 async def health_check(request):
     return web.Response(text="OK")
 
+# --- Запуск приложения ---
 app = web.Application()
 app.router.add_get('/', handle_index)
 app.router.add_get('/ws', websocket_handler)
