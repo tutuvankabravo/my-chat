@@ -365,7 +365,7 @@
         function connect(username) {
             // Автоматически определяет протокол (ws:// или wss://) и хост
             const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-            const wsUrl = `${wsProtocol}//${window.location.host}`;
+            const wsUrl = `${wsProtocol}//${window.location.host}/ws`;  // Добавлен /ws
             
             ws = new WebSocket(wsUrl);
             

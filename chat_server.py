@@ -1,11 +1,10 @@
 import asyncio
 import json
 import websockets
-import http
-import signal
-import os
 from datetime import datetime
 import hashlib
+import os
+from aiohttp import web
 
 # === НАСТРОЙКИ ===
 PORT = int(os.environ.get("PORT", 8080))
@@ -103,58 +102,68 @@ class ChatServer:
 
 chat_instance = ChatServer()
 
-def health_check(connection, request):
-    if request.path == "/healthz":
-        return connection.respond(http.HTTPStatus.OK, b"OK\n")
+# === HTTP ОБРАБОТЧИК ДЛЯ ОТДАЧИ HTML ===
+async def handle_index(request):
+    """Отдает файл chat.html"""
+    try:
+        with open('chat.html', 'r', encoding='utf-8') as f:
+            content = f.read()
+        return web.Response(text=content, content_type='text/html; charset=utf-8')
+    except:
+        return web.Response(text="<h1>File chat.html not found</h1>", content_type='text/html', status=404)
 
-async def websocket_handler(websocket):
-    chat_server = chat_instance
+# === WEBSOCKET ОБРАБОТЧИК ===
+async def websocket_handler(request):
+    """Обработчик WebSocket соединений"""
+    ws = web.WebSocketResponse()
+    await ws.prepare(request)
     
     try:
-        await websocket.send(json.dumps({
-            'type': 'greeting',
-            'message': 'Добро пожаловать в чат! Представьтесь:'
-        }))
+        # Ждем имя пользователя
+        greeting = await ws.receive()
+        if greeting.type != web.WSMsgType.TEXT:
+            return ws
         
-        response = await websocket.recv()
-        data = json.loads(response)
+        data = json.loads(greeting.data)
         username = data.get('username', '').strip()
         
         if not username:
             username = f"Гость_{hashlib.md5(str(datetime.now()).encode()).hexdigest()[:6]}"
         
         username = username[:20]
-        await chat_server.register(websocket, username)
         
-        async for message in websocket:
-            try:
-                data = json.loads(message)
-                await chat_server.handle_message(websocket, data)
-            except json.JSONDecodeError:
-                pass
+        # Регистрируем пользователя
+        await chat_instance.register(ws, username)
+        
+        # Основной цикл обработки сообщений
+        async for msg in ws:
+            if msg.type == web.WSMsgType.TEXT:
+                try:
+                    data = json.loads(msg.data)
+                    await chat_instance.handle_message(ws, data)
+                except json.JSONDecodeError:
+                    pass
+            elif msg.type == web.WSMsgType.ERROR:
+                break
     
-    except websockets.exceptions.ConnectionClosed:
-        pass
+    except Exception as e:
+        print(f"WebSocket error: {e}")
     finally:
-        await chat_server.unregister(websocket)
-
-async def main():
-    loop = asyncio.get_running_loop()
-    stop = loop.create_future()
+        await chat_instance.unregister(ws)
     
-    try:
-        loop.add_signal_handler(signal.SIGTERM, stop.set_result, None)
-    except NotImplementedError:
-        pass
-    
-    async with websockets.serve(
-        websocket_handler, 
-        "0.0.0.0", 
-        PORT, 
-        process_request=health_check
-    ):
-        print(f"🚀 WebSocket сервер запущен на порту {PORT}")
-        await stop
+    return ws
 
+# === ЗАПУСК СЕРВЕРА ===
+app = web.Application()
+app.router.add_get('/', handle_index)
+app.router.add_get('/chat.html', handle_index)
+app.router.add_get('/ws', websocket_handler)
+
+# Добавляем health check для Render
+async def health_check(request):
+    return web.Response(text="OK")
+app.router.add_get('/healthz', health_check)
+
+# Запускаем приложение
 if __name__ == "__main__":
-    asyncio.run(main())
+    web.run_app(app, host='0.0.0.0', port=PORT)
