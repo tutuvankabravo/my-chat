@@ -302,7 +302,7 @@ class ChatServer:
 
 chat_processor = ChatServer()
 
-# --- Встроенный HTML (полностью адаптированный с поиском и фильтрацией) ---
+# --- Встроенный HTML (исправленная версия) ---
 HTML_PAGE = '''<!DOCTYPE html>
 <html lang="ru">
 <head>
@@ -687,7 +687,7 @@ HTML_PAGE = '''<!DOCTYPE html>
     <div class="chat-container">
         <div class="input-area">
             <textarea id="messageInput" class="message-input" placeholder="Введите сообщение..."></textarea>
-            <button class="send-btn" onclick="sendMessage()">📨 Отправить</button>
+            <button class="send-btn" id="sendButton">📨 Отправить</button>
         </div>
         
         <div class="chat-header">
@@ -697,8 +697,8 @@ HTML_PAGE = '''<!DOCTYPE html>
             </div>
             <div class="user-info">
                 <span class="username-display" id="currentUsername">Загрузка...</span>
-                <button class="change-name-btn" onclick="changeUsername()">Сменить имя</button>
-                <button class="toggle-users-btn" onclick="toggleUsers()">👥</button>
+                <button class="change-name-btn" id="changeNameBtn">Сменить имя</button>
+                <button class="toggle-users-btn" id="toggleUsersBtn">👥</button>
             </div>
         </div>
         
@@ -706,18 +706,18 @@ HTML_PAGE = '''<!DOCTYPE html>
             <div class="users-sidebar" id="usersSidebar">
                 <div class="users-header">👥 Участники (<span id="usersCount">0</span>)</div>
                 <div class="search-box">
-                    <input type="text" id="userSearch" class="search-input" placeholder="🔍 Поиск участников..." onkeyup="filterUsers()">
+                    <input type="text" id="userSearch" class="search-input" placeholder="🔍 Поиск участников...">
                 </div>
                 <div class="filter-buttons">
-                    <button class="filter-btn active" onclick="setUserFilter('all')">Все</button>
-                    <button class="filter-btn" onclick="setUserFilter('spam')">🚫 Спам</button>
-                    <button class="filter-btn" onclick="setUserFilter('clean')">✅ Чистые</button>
+                    <button class="filter-btn active" data-filter="all">Все</button>
+                    <button class="filter-btn" data-filter="spam">🚫 Спам</button>
+                    <button class="filter-btn" data-filter="clean">✅ Чистые</button>
                 </div>
                 <div class="users-list" id="usersList"><div>Подключение...</div></div>
             </div>
             <div class="messages-area">
                 <div class="chat-tabs" id="chatTabs">
-                    <button class="chat-tab active" onclick="switchChat('main')">💬 Общий чат</button>
+                    <button class="chat-tab active" data-chat="main">💬 Общий чат</button>
                 </div>
                 <div class="messages-container" id="messagesContainer"></div>
                 <div class="char-counter" id="charCounter">0/1600</div>
@@ -726,15 +726,22 @@ HTML_PAGE = '''<!DOCTYPE html>
         </div>
     </div>
     <script>
-        let ws = null, currentUser = null, sessionId = null, typingTimeout = null, isTyping = false, typingUsers = new Set();
-        let currentChat = 'main'; // 'main' или имя пользователя для личного чата
-        let privateChats = new Map(); // {username: messages[]}
-        let allUsers = []; // Список всех пользователей для поиска
-        let currentUserFilter = 'all'; // all, spam, clean
+        // Глобальные переменные
+        let ws = null;
+        let currentUser = null;
+        let sessionId = null;
+        let typingTimeout = null;
+        let isTyping = false;
+        let typingUsers = new Set();
+        let currentChat = 'main';
+        let privateChats = new Map();
+        let allUsers = [];
+        let currentUserFilter = 'all';
         let searchQuery = '';
-        let spamStats = {}; // Статистика спама {username: count}
-        let spamList = []; // Черный список текущего пользователя
+        let spamStats = {};
+        let spamList = [];
         
+        // DOM элементы
         const messagesContainer = document.getElementById('messagesContainer');
         const messageInput = document.getElementById('messageInput');
         const typingIndicator = document.getElementById('typingIndicator');
@@ -744,8 +751,15 @@ HTML_PAGE = '''<!DOCTYPE html>
         const usersList = document.getElementById('usersList');
         const usersSidebar = document.getElementById('usersSidebar');
         const charCounter = document.getElementById('charCounter');
-
-        // Генерируем или получаем уникальный ID сессии
+        const sendButton = document.getElementById('sendButton');
+        const changeNameBtn = document.getElementById('changeNameBtn');
+        const toggleUsersBtn = document.getElementById('toggleUsersBtn');
+        const userSearch = document.getElementById('userSearch');
+        
+        // История сообщений
+        window.messagesHistory = [];
+        
+        // Функции
         function getSessionId() {
             let id = localStorage.getItem('chat_session_id');
             if (!id) {
@@ -754,49 +768,44 @@ HTML_PAGE = '''<!DOCTYPE html>
             }
             return id;
         }
-
-        function toggleUsers() {
+        
+        window.toggleUsers = function() {
             usersSidebar.classList.toggle('show');
             if (usersSidebar.classList.contains('show')) {
-                filterUsers(); // Обновляем фильтр при открытии
+                filterUsers();
             }
-        }
+        };
         
-        function setUserFilter(filter) {
+        window.setUserFilter = function(filter) {
             currentUserFilter = filter;
-            // Обновляем активную кнопку
             document.querySelectorAll('.filter-btn').forEach(btn => {
                 btn.classList.remove('active');
-                if (btn.textContent.includes(filter === 'all' ? 'Все' : filter === 'spam' ? 'Спам' : 'Чистые')) {
+                if (btn.getAttribute('data-filter') === filter) {
                     btn.classList.add('active');
                 }
             });
             filterUsers();
-        }
+        };
         
         function filterUsers() {
-            searchQuery = document.getElementById('userSearch').value.toLowerCase();
+            searchQuery = userSearch.value.toLowerCase();
             
             let filteredUsers = [...allUsers];
             
-            // Фильтр по поиску
             if (searchQuery) {
                 filteredUsers = filteredUsers.filter(user => 
                     user.name.toLowerCase().includes(searchQuery)
                 );
             }
             
-            // Фильтр по типу (спам/не спам)
             if (currentUserFilter === 'spam') {
                 filteredUsers = filteredUsers.filter(user => isSpamUser(user.name));
             } else if (currentUserFilter === 'clean') {
                 filteredUsers = filteredUsers.filter(user => !isSpamUser(user.name));
             }
             
-            // Сортировка по имени
             filteredUsers.sort((a, b) => a.name.localeCompare(b.name));
             
-            // Отображаем
             if (filteredUsers.length === 0) {
                 usersList.innerHTML = '<div style="padding: 10px; text-align: center; color: var(--text-secondary);">👤 Пользователи не найдены</div>';
                 return;
@@ -829,59 +838,61 @@ HTML_PAGE = '''<!DOCTYPE html>
             return spamList.includes(username);
         }
         
-        function toggleSpam(username) {
+        window.toggleSpam = function(username) {
             if (isSpamUser(username)) {
-                // Убираем отметку спама
                 if (ws && ws.readyState === WebSocket.OPEN) {
                     ws.send(JSON.stringify({ 
                         type: 'unmark_spam', 
                         spammer: username 
                     }));
                 }
-                // Локально обновляем
                 const index = spamList.indexOf(username);
                 if (index > -1) spamList.splice(index, 1);
-                showSystemMessage(`✅ ${username} удален из черного списка`);
+                showSystemMessage('✅ ' + username + ' удален из черного списка');
             } else {
-                // Отмечаем как спам
                 if (ws && ws.readyState === WebSocket.OPEN) {
                     ws.send(JSON.stringify({ 
                         type: 'mark_spam', 
                         spammer: username 
                     }));
                 }
-                // Локально обновляем
                 spamList.push(username);
-                showSystemMessage(`⚠️ ${username} отмечен как спам. Сообщения от него не будут приходить.`);
+                showSystemMessage('⚠️ ' + username + ' отмечен как спам. Сообщения от него не будут приходить.');
             }
-            filterUsers(); // Обновляем список
-        }
+            filterUsers();
+        };
         
         function updateSpamList() {
             if (ws && ws.readyState === WebSocket.OPEN) {
                 ws.send(JSON.stringify({ type: 'get_spam_list' }));
             }
         }
-
+        
         function connect(username, sessionId) {
             const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
             const wsUrl = `${wsProtocol}//${window.location.host}/ws`;
             ws = new WebSocket(wsUrl);
-
+            
             ws.onopen = () => {
                 console.log('Connected');
                 ws.send(JSON.stringify({ username: username, session_id: sessionId }));
                 setInterval(() => {
                     if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'ping' }));
                 }, 30000);
-                // Запрашиваем список спамеров
                 setTimeout(() => updateSpamList(), 1000);
             };
-            ws.onmessage = (event) => { const data = JSON.parse(event.data); handleMessage(data); };
+            ws.onmessage = (event) => { 
+                const data = JSON.parse(event.data); 
+                handleMessage(data); 
+            };
             ws.onerror = (error) => console.error('WebSocket error:', error);
-            ws.onclose = () => { console.log('Disconnected'); showSystemMessage('Соединение потеряно. Переподключение...'); setTimeout(() => { if (currentUser) connect(currentUser, sessionId); }, 3000); };
+            ws.onclose = () => { 
+                console.log('Disconnected'); 
+                showSystemMessage('Соединение потеряно. Переподключение...'); 
+                setTimeout(() => { if (currentUser) connect(currentUser, sessionId); }, 3000); 
+            };
         }
-
+        
         function handleMessage(data) {
             switch(data.type) {
                 case 'message': 
@@ -903,11 +914,11 @@ HTML_PAGE = '''<!DOCTYPE html>
                     break;
                 case 'spam_list':
                     spamList = data.spammers || [];
-                    filterUsers(); // Обновляем отображение
+                    filterUsers();
                     break;
                 case 'spam_stats':
                     spamStats = data.stats || {};
-                    filterUsers(); // Обновляем статистику
+                    filterUsers();
                     break;
             }
         }
@@ -916,24 +927,19 @@ HTML_PAGE = '''<!DOCTYPE html>
             const isFromMe = message.from === currentUser;
             const otherUser = isFromMe ? message.to : message.from;
             
-            // Проверяем, не в спам-листе ли отправитель
             if (!isFromMe && spamList.includes(message.from)) {
-                // Пропускаем сообщение от спамера
                 return;
             }
             
-            // Сохраняем сообщение в приватный чат
             if (!privateChats.has(otherUser)) {
                 privateChats.set(otherUser, []);
                 addPrivateChatTab(otherUser);
             }
             privateChats.get(otherUser).push(message);
             
-            // Если открыт этот приватный чат, показываем сообщение
             if (currentChat === otherUser) {
                 addPrivateMessageToChat(message, otherUser);
             } else if (!isFromMe) {
-                // Показываем уведомление о новом сообщении
                 showNotification(otherUser);
             }
         }
@@ -947,73 +953,71 @@ HTML_PAGE = '''<!DOCTYPE html>
             
             const tab = document.createElement('button');
             tab.className = 'chat-tab private';
-            tab.innerHTML = `💬 ${username} <span class="close-tab" onclick="event.stopPropagation(); closePrivateChat('${username}')">✖</span>`;
-            tab.onclick = () => switchChat(username);
+            tab.setAttribute('data-chat', username);
+            tab.innerHTML = `💬 ${username} <span class="close-tab" onclick="event.stopPropagation(); window.closePrivateChat('${username}')">✖</span>`;
+            tab.onclick = () => window.switchChat(username);
             tabsContainer.appendChild(tab);
         }
         
-        function closePrivateChat(username) {
+        window.closePrivateChat = function(username) {
             privateChats.delete(username);
             const tabsContainer = document.getElementById('chatTabs');
             const tab = Array.from(tabsContainer.children).find(
-                t => t.textContent.includes(username)
+                t => t.getAttribute('data-chat') === username
             );
             if (tab) tab.remove();
             
             if (currentChat === username) {
-                switchChat('main');
+                window.switchChat('main');
             }
-        }
+        };
         
-        function switchChat(chatId) {
+        window.switchChat = function(chatId) {
             currentChat = chatId;
             
-            // Обновляем активную вкладку
             const tabs = document.querySelectorAll('.chat-tab');
             tabs.forEach(tab => {
-                if ((chatId === 'main' && tab.textContent.includes('Общий чат')) ||
-                    (chatId !== 'main' && tab.textContent.includes(chatId))) {
+                const tabChat = tab.getAttribute('data-chat');
+                if ((chatId === 'main' && tabChat === 'main') ||
+                    (chatId !== 'main' && tabChat === chatId)) {
                     tab.classList.add('active');
                 } else {
                     tab.classList.remove('active');
                 }
             });
             
-            // Очищаем и перерисовываем сообщения
             messagesContainer.innerHTML = '';
             
             if (chatId === 'main') {
-                // Показываем общие сообщения из истории
                 window.messagesHistory.forEach(msg => {
                     if (msg.type === 'message') {
                         addMessageToChat(msg);
                     }
                 });
             } else {
-                // Показываем приватные сообщения
                 const messages = privateChats.get(chatId) || [];
                 messages.forEach(msg => {
                     addPrivateMessageToChat(msg, chatId);
                 });
             }
             scrollToBottom();
-        }
+        };
         
         function addPrivateMessageToChat(message, otherUser) {
             const messageDiv = document.createElement('div');
             const isFromMe = message.from === currentUser;
             messageDiv.className = `message ${isFromMe ? 'own' : ''} private`;
             const sender = isFromMe ? 'Вы' : message.from;
-            const textWithBreaks = escapeHtml(message.text).replace(/\\n/g, '<br>');
+            const textWithBreaks = escapeHtml(message.text).replace(/\\\\n/g, '<br>');
             messageDiv.innerHTML = `<div class="message-bubble"><div class="message-username">${escapeHtml(sender)}</div><div class="message-text">${textWithBreaks}</div><div class="message-time">${formatTime(message.timestamp)}</div></div>`;
             messagesContainer.appendChild(messageDiv);
             scrollToBottom();
         }
-
+        
         function addMessageToChat(message) {
             const messageDiv = document.createElement('div');
             messageDiv.className = `message ${message.username === currentUser ? 'own' : ''}`;
-            const textWithBreaks = escapeHtml(message.text).replace(/\\n/g, '<br>');
+            const textWithBreaks = escapeHtml(message.text).replace(/\\\\n/g, '<br>');
             messageDiv.innerHTML = `<div class="message-bubble"><div class="message-username">${escapeHtml(message.username)}</div><div class="message-text">${textWithBreaks}</div><div class="message-time">${formatTime(message.timestamp)}</div></div>`;
             messagesContainer.appendChild(messageDiv);
             scrollToBottom();
@@ -1031,7 +1035,7 @@ HTML_PAGE = '''<!DOCTYPE html>
         function showNotification(username) {
             const tabsContainer = document.getElementById('chatTabs');
             const tab = Array.from(tabsContainer.children).find(
-                t => t.textContent.includes(username)
+                t => t.getAttribute('data-chat') === username
             );
             if (tab && currentChat !== username) {
                 tab.style.background = '#ff9800';
@@ -1043,7 +1047,7 @@ HTML_PAGE = '''<!DOCTYPE html>
             }
         }
         
-        function sendMessage() { 
+        window.sendMessage = function() { 
             const text = messageInput.value;
             if (!text.trim() || !ws || ws.readyState !== WebSocket.OPEN) return;
             
@@ -1064,9 +1068,9 @@ HTML_PAGE = '''<!DOCTYPE html>
                 ws.send(JSON.stringify({ type: 'typing', is_typing: false })); 
                 isTyping = false; 
             } 
-        }
+        };
         
-        function startPrivateChat(username) {
+        window.startPrivateChat = function(username) {
             if (username === currentUser) {
                 showSystemMessage('Нельзя начать чат с самим собой');
                 return;
@@ -1075,23 +1079,20 @@ HTML_PAGE = '''<!DOCTYPE html>
                 privateChats.set(username, []);
                 addPrivateChatTab(username);
             }
-            switchChat(username);
+            window.switchChat(username);
             usersSidebar.classList.remove('show');
-        }
+        };
         
         function handleKeyDown(event) {
             if (event.key === 'Enter' && !event.shiftKey) {
                 event.preventDefault();
-                sendMessage();
-            } else if (event.key === 'Enter' && event.shiftKey) {
-                // Разрешаем shift+enter для новой строки
-                return;
+                window.sendMessage();
             }
         }
         
         function updateCharCounter() {
             const length = messageInput.value.length;
-            charCounter.textContent = `${length}/1600`;
+            charCounter.textContent = length + '/1600';
             if (length > 1400) {
                 charCounter.className = 'char-counter warning';
             } else if (length > 1600) {
@@ -1118,12 +1119,12 @@ HTML_PAGE = '''<!DOCTYPE html>
         
         function updateUsersList(users, count) { 
             usersCountSpan.textContent = count; 
-            onlineCountSpan.textContent = `${count} онлайн`; 
-            filterUsers(); // Применяем текущие фильтры
+            onlineCountSpan.textContent = count + ' онлайн'; 
+            filterUsers();
         }
         
         function updateOnlineCount(count) { 
-            onlineCountSpan.textContent = `${count} онлайн`; 
+            onlineCountSpan.textContent = count + ' онлайн'; 
             usersCountSpan.textContent = count; 
         }
         
@@ -1133,12 +1134,12 @@ HTML_PAGE = '''<!DOCTYPE html>
             else typingUsers.delete(username); 
             if (typingUsers.size > 0) { 
                 const names = Array.from(typingUsers); 
-                let text = names.length === 1 ? `${names[0]} печатает...` : names.length === 2 ? `${names[0]} и ${names[1]} печатают...` : `${names.length} человек печатают...`; 
+                let text = names.length === 1 ? names[0] + ' печатает...' : names.length === 2 ? names[0] + ' и ' + names[1] + ' печатают...' : names.length + ' человек печатают...'; 
                 typingIndicator.textContent = text; 
             } else typingIndicator.textContent = ''; 
         }
         
-        function changeUsername() { 
+        window.changeUsername = function() { 
             const newName = prompt('Введите новое имя (макс. 20 символов):', currentUser); 
             if (newName && newName.trim() && newName.trim() !== currentUser) { 
                 currentUser = newName.trim().substring(0, 20); 
@@ -1147,7 +1148,7 @@ HTML_PAGE = '''<!DOCTYPE html>
                 if (ws) ws.close(); 
                 setTimeout(() => connect(currentUser, sessionId), 100); 
             } 
-        }
+        };
         
         function escapeHtml(text) { 
             const div = document.createElement('div'); 
@@ -1169,19 +1170,18 @@ HTML_PAGE = '''<!DOCTYPE html>
             const newHeight = Math.min(this.scrollHeight, 120);
             this.style.height = newHeight + 'px';
         }
-
+        
         // Инициализация
         sessionId = getSessionId();
         const saved = localStorage.getItem('chat_username');
         if (saved) currentUser = saved;
         else { 
-            currentUser = prompt('Ваше имя:', 'Гость') || `Гость_${Math.floor(Math.random() * 1000)}`; 
+            currentUser = prompt('Ваше имя:', 'Гость') || 'Гость_' + Math.floor(Math.random() * 1000); 
             localStorage.setItem('chat_username', currentUser); 
         }
         currentUsernameSpan.textContent = currentUser;
         
         // Сохраняем историю сообщений
-        window.messagesHistory = [];
         const originalAddMessage = addMessageToChat;
         window.addMessageToChat = function(message) {
             window.messagesHistory.push(message);
@@ -1191,19 +1191,35 @@ HTML_PAGE = '''<!DOCTYPE html>
         
         connect(currentUser, sessionId);
         
-        messageInput.addEventListener('input', (e) => {
+        // Назначение обработчиков событий
+        messageInput.addEventListener('input', function(e) {
             autoResizeTextarea.call(messageInput);
             updateCharCounter();
         });
         messageInput.addEventListener('keydown', handleKeyDown);
         messageInput.addEventListener('keyup', handleKeyUp);
+        sendButton.addEventListener('click', window.sendMessage);
+        changeNameBtn.addEventListener('click', window.changeUsername);
+        toggleUsersBtn.addEventListener('click', window.toggleUsers);
+        userSearch.addEventListener('keyup', filterUsers);
+        
+        // Обработчики для кнопок фильтрации
+        document.querySelectorAll('.filter-btn').forEach(btn => {
+            btn.addEventListener('click', function() {
+                window.setUserFilter(this.getAttribute('data-filter'));
+            });
+        });
+        
+        // Обработчик для вкладки общего чата
+        document.querySelector('.chat-tab[data-chat="main"]').addEventListener('click', function() {
+            window.switchChat('main');
+        });
         
         messageInput.focus();
         
         document.addEventListener('click', function(event) {
             if (usersSidebar.classList.contains('show')) {
-                const toggleBtn = document.querySelector('.toggle-users-btn');
-                if (!usersSidebar.contains(event.target) && !toggleBtn.contains(event.target)) {
+                if (!usersSidebar.contains(event.target) && !toggleUsersBtn.contains(event.target)) {
                     usersSidebar.classList.remove('show');
                 }
             }
