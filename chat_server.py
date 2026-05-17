@@ -375,33 +375,35 @@ HTML_PAGE = r'''<!DOCTYPE html>
 <html lang="ru">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no, viewport-fit=cover">
     <title>Веб-чат с звонками</title>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
+        
         body {
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
             background: #0d1117;
             color: #f0f6fc;
-            height: 100vh;
+            height: 100dvh;
             overflow: hidden;
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
         }
+        
         .chat-container {
             display: flex;
             flex-direction: column;
-            height: 100vh;
-            max-width: 1400px;
-            margin: 0 auto;
+            height: 100dvh;
+            max-height: 100dvh;
+            overflow: hidden;
+            position: relative;
         }
-        .input-area {
-            background: #161b22;
-            border-top: 1px solid #30363d;
-            padding: 10px 12px;
-            display: flex;
-            gap: 8px;
-            flex-shrink: 0;
-        }
+        
         .chat-header {
+            flex-shrink: 0;
             background: #161b22;
             border-bottom: 1px solid #30363d;
             padding: 8px 12px;
@@ -410,13 +412,16 @@ HTML_PAGE = r'''<!DOCTYPE html>
             align-items: center;
             flex-wrap: wrap;
             gap: 6px;
-            flex-shrink: 0;
+            z-index: 10;
         }
+        
         .chat-main {
-            display: flex;
             flex: 1;
+            display: flex;
             overflow: hidden;
+            min-height: 0;
         }
+        
         .toggle-users-btn, .change-name-btn {
             background: #21262d;
             border: 1px solid #30363d;
@@ -426,6 +431,7 @@ HTML_PAGE = r'''<!DOCTYPE html>
             cursor: pointer;
             font-size: 0.8em;
         }
+        
         .users-sidebar {
             width: 280px;
             background: #161b22;
@@ -434,19 +440,23 @@ HTML_PAGE = r'''<!DOCTYPE html>
             flex-direction: column;
             overflow: hidden;
         }
+        
         .users-sidebar.show {
             display: flex;
         }
+        
         .users-header {
             padding: 10px;
             border-bottom: 1px solid #30363d;
             font-weight: bold;
             background: #21262d;
         }
+        
         .search-box {
             padding: 8px;
             border-bottom: 1px solid #30363d;
         }
+        
         .search-input {
             width: 100%;
             padding: 8px 12px;
@@ -456,12 +466,14 @@ HTML_PAGE = r'''<!DOCTYPE html>
             border-radius: 20px;
             outline: none;
         }
+        
         .filter-buttons {
             padding: 8px;
             display: flex;
             gap: 8px;
             border-bottom: 1px solid #30363d;
         }
+        
         .filter-btn {
             flex: 1;
             padding: 5px 8px;
@@ -472,15 +484,18 @@ HTML_PAGE = r'''<!DOCTYPE html>
             cursor: pointer;
             font-size: 0.75em;
         }
+        
         .filter-btn.active {
             background: #58a6ff;
             color: white;
         }
+        
         .users-list {
             flex: 1;
             overflow-y: auto;
             padding: 8px;
         }
+        
         .user-item {
             padding: 8px 10px;
             margin: 2px 0;
@@ -490,6 +505,7 @@ HTML_PAGE = r'''<!DOCTYPE html>
             gap: 8px;
             flex-wrap: wrap;
         }
+        
         .user-item:hover { background: #21262d; }
         .user-item.spam { background: #6e3a3a; opacity: 0.7; }
         .user-avatar {
@@ -500,6 +516,7 @@ HTML_PAGE = r'''<!DOCTYPE html>
         }
         .user-avatar.spam { background: #da3633; }
         .user-name { flex: 1; font-size: 0.85em; }
+        
         .private-badge, .spam-badge {
             font-size: 0.7em;
             padding: 2px 6px;
@@ -508,12 +525,15 @@ HTML_PAGE = r'''<!DOCTYPE html>
         }
         .private-badge { background: #3a4a6e; }
         .spam-badge { background: #da3633; }
+        
         .messages-area {
             flex: 1;
             display: flex;
             flex-direction: column;
             overflow: hidden;
+            min-height: 0;
         }
+        
         .chat-tabs {
             display: flex;
             gap: 2px;
@@ -524,6 +544,7 @@ HTML_PAGE = r'''<!DOCTYPE html>
             flex-shrink: 0;
             align-items: center;
         }
+        
         .chat-tab {
             padding: 6px 12px;
             background: #21262d;
@@ -533,15 +554,18 @@ HTML_PAGE = r'''<!DOCTYPE html>
             border-radius: 6px;
             white-space: nowrap;
         }
+        
         .chat-tab.active {
             background: #58a6ff;
             color: white;
         }
+        
         .close-tab {
             margin-left: 8px;
             cursor: pointer;
             font-weight: bold;
         }
+        
         .chat-call-btn {
             background: #238636;
             border: none;
@@ -552,13 +576,16 @@ HTML_PAGE = r'''<!DOCTYPE html>
             font-size: 0.8em;
             margin-left: 5px;
         }
+        
         .chat-call-btn.ongoing {
             background: #da3633;
         }
+        
         .chat-call-btn:disabled {
             opacity: 0.5;
             cursor: not-allowed;
         }
+        
         #callModeSelect {
             background: #21262d;
             border: 1px solid #30363d;
@@ -568,6 +595,7 @@ HTML_PAGE = r'''<!DOCTYPE html>
             font-size: 0.8em;
             cursor: pointer;
         }
+        
         .messages-container {
             flex: 1;
             overflow-y: auto;
@@ -575,7 +603,9 @@ HTML_PAGE = r'''<!DOCTYPE html>
             display: flex;
             flex-direction: column;
             gap: 10px;
+            -webkit-overflow-scrolling: touch;
         }
+        
         .message { display: flex; }
         .message.system { justify-content: center; }
         .message.system .message-bubble {
@@ -616,6 +646,7 @@ HTML_PAGE = r'''<!DOCTYPE html>
             margin-top: 3px;
             text-align: right;
         }
+        
         .typing-indicator {
             padding: 6px 16px;
             font-size: 0.75em;
@@ -625,6 +656,17 @@ HTML_PAGE = r'''<!DOCTYPE html>
             background: #0d1117;
             flex-shrink: 0;
         }
+        
+        .input-area {
+            flex-shrink: 0;
+            background: #161b22;
+            border-top: 1px solid #30363d;
+            padding: 8px 12px;
+            padding-bottom: max(8px, env(safe-area-inset-bottom));
+            display: flex;
+            gap: 8px;
+        }
+        
         .message-input {
             flex: 1;
             background: #21262d;
@@ -638,6 +680,7 @@ HTML_PAGE = r'''<!DOCTYPE html>
             max-height: 120px;
             min-height: 40px;
         }
+        
         .send-btn {
             background: #58a6ff;
             color: white;
@@ -647,6 +690,7 @@ HTML_PAGE = r'''<!DOCTYPE html>
             cursor: pointer;
             font-weight: bold;
         }
+        
         .chat-title h1 { font-size: 1.1em; }
         .online-status {
             background: #238636;
@@ -661,6 +705,7 @@ HTML_PAGE = r'''<!DOCTYPE html>
             border-radius: 20px;
             font-size: 0.8em;
         }
+        
         @media (max-width: 768px) {
             .users-sidebar {
                 width: 100%;
@@ -670,6 +715,10 @@ HTML_PAGE = r'''<!DOCTYPE html>
                 height: 100%;
                 z-index: 1000;
             }
+        }
+        
+        @supports (height: 100dvh) {
+            body, .chat-container { height: 100dvh; }
         }
     </style>
 </head>
@@ -686,6 +735,7 @@ HTML_PAGE = r'''<!DOCTYPE html>
                 <button class="toggle-users-btn" id="toggleUsersBtn">Участники</button>
             </div>
         </div>
+        
         <div class="chat-main">
             <div class="users-sidebar" id="usersSidebar">
                 <div class="users-header">Участники (<span id="usersCount">0</span>)</div>
@@ -699,6 +749,7 @@ HTML_PAGE = r'''<!DOCTYPE html>
                 </div>
                 <div class="users-list" id="usersList"></div>
             </div>
+            
             <div class="messages-area">
                 <div class="chat-tabs" id="chatTabs">
                     <button class="chat-tab active" data-chat="main">Общий чат</button>
@@ -707,11 +758,13 @@ HTML_PAGE = r'''<!DOCTYPE html>
                 <div class="typing-indicator" id="typingIndicator"></div>
             </div>
         </div>
+        
         <div class="input-area">
             <textarea id="messageInput" class="message-input" placeholder="Введите сообщение..."></textarea>
             <button class="send-btn" id="sendButton">Отправить</button>
         </div>
     </div>
+    
     <script>
         var ws = null;
         var currentUser = null;
