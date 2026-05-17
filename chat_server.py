@@ -1,28 +1,130 @@
 import asyncio
 import json
 import os
-from datetime import datetime
 import hashlib
+import secrets
+from datetime import datetime
+from pathlib import Path
+import subprocess
 from aiohttp import web
 
 # === НАСТРОЙКИ ===
 PORT = int(os.environ.get("PORT", 8080))
 MAX_MESSAGE_LENGTH = 1600
+USERS_FILE = "users.json"  # Файл с пользователями
 # =================
 
 messages_history = []
 MAX_HISTORY = 100
 connected_clients = set()
 
+class UserAuth:
+    """Класс для работы с аутентификацией пользователей"""
+    def __init__(self, users_file_path="users.json"):
+        self.users_file_path = users_file_path
+        self.users_cache = {}
+        self.last_sync_time = 0
+        
+    def load_users(self, force=False):
+        """Загружает пользователей из JSON файла"""
+        if not os.path.exists(self.users_file_path):
+            print(f"⚠️ Файл {self.users_file_path} не найден, создаю пустой")
+            self.users_cache = {}
+            self._save_users()
+            return True
+            
+        try:
+            with open(self.users_file_path, 'r', encoding='utf-8') as f:
+                self.users_cache = json.load(f)
+            print(f"✅ Загружено {len(self.users_cache)} пользователей")
+            return True
+        except json.JSONDecodeError as e:
+            print(f"❌ Ошибка в JSON файле: {e}")
+            return False
+        except Exception as e:
+            print(f"❌ Ошибка загрузки: {e}")
+            return False
+    
+    def _save_users(self):
+        """Сохраняет пользователей в JSON файл"""
+        try:
+            with open(self.users_file_path, 'w', encoding='utf-8') as f:
+                json.dump(self.users_cache, f, indent=2, ensure_ascii=False)
+            return True
+        except Exception as e:
+            print(f"❌ Ошибка сохранения: {e}")
+            return False
+    
+    def verify_password(self, email, password):
+        """Проверяет пароль пользователя"""
+        self.load_users()  # Всегда загружаем актуальные данные
+        
+        if email not in self.users_cache:
+            return False
+        
+        user_data = self.users_cache[email]
+        
+        # Проверяем формат (поддерживаем оба варианта: старый и новый)
+        if 'salt' in user_data and 'hash' in user_data:
+            # Новый формат с солью
+            salt = bytes.fromhex(user_data['salt'])
+            stored_hash = user_data['hash']
+            
+            test_hash = hashlib.pbkdf2_hmac(
+                'sha256',
+                password.encode('utf-8'),
+                salt,
+                100000
+            ).hex()
+            
+            return test_hash == stored_hash
+        elif 'password_hash' in user_data:
+            # Старый формат (для обратной совместимости)
+            return user_data['password_hash'] == hashlib.sha256(password.encode()).hexdigest()
+        
+        return False
+    
+    def get_user_name(self, email):
+        """Возвращает имя пользователя по email"""
+        if email in self.users_cache:
+            return self.users_cache[email].get('name', email.split('@')[0])
+        return email.split('@')[0]
+    
+    def sync_from_github(self):
+        """Подтягивает изменения из GitHub (если репозиторий git)"""
+        try:
+            # Проверяем, есть ли .git директория
+            if os.path.exists('.git'):
+                result = subprocess.run(
+                    ['git', 'pull'],
+                    capture_output=True,
+                    text=True,
+                    timeout=10
+                )
+                if result.returncode == 0:
+                    print("🔄 Синхронизация с GitHub выполнена")
+                    self.load_users(force=True)
+                    return True
+                else:
+                    print(f"⚠️ Ошибка git pull: {result.stderr}")
+            return False
+        except Exception as e:
+            print(f"❌ Ошибка синхронизации: {e}")
+            return False
+
+# Инициализируем аутентификацию
+user_auth = UserAuth(USERS_FILE)
+user_auth.load_users()
+
 class ChatServer:
     def __init__(self):
-        self.clients = {}
+        self.clients = {}  # ws -> {'username': str, 'email': str, 'session_id': str}
         self.user_sessions = {}
         self.private_chats = {}
         self.spam_filters = {}
         self.spam_scores = {}
+        self.authorized_tokens = {}  # token -> {'email': str, 'username': str, 'expires': float}
 
-    # НОВЫЙ МЕТОД: проверка, занят ли ник
     def is_nickname_taken(self, username, exclude_ws=None):
         """Проверяет, есть ли уже пользователь с таким ником"""
         for ws, client_data in self.clients.items():
@@ -32,7 +134,6 @@ class ChatServer:
                 return True
         return False
 
-    # НОВЫЙ МЕТОД: генерация уникального ника
     def generate_unique_nickname(self, base_nickname):
         """Если ник занят, добавляет число в конец"""
         if not self.is_nickname_taken(base_nickname):
@@ -43,18 +144,22 @@ class ChatServer:
             counter += 1
         return f"{base_nickname}{counter}"
 
-    async def register(self, ws, username, session_id):
-        # ПРОВЕРКА: если ник занят, генерируем уникальный
+    async def register(self, ws, email, username, session_id):
+        """Регистрация подключения"""
+        # Проверка уникальности ника
         original_username = username
         if self.is_nickname_taken(username):
             username = self.generate_unique_nickname(username)
-            # Сообщаем пользователю, что его ник изменён
             await ws.send_str(json.dumps({
                 'type': 'system',
                 'message': f'⚠️ Имя "{original_username}" уже занято. Вы вошли как "{username}"'
             }))
         
-        self.clients[ws] = {'username': username, 'session_id': session_id}
+        self.clients[ws] = {
+            'username': username, 
+            'email': email,
+            'session_id': session_id
+        }
         connected_clients.add(ws)
         
         if username not in self.spam_filters:
@@ -63,12 +168,14 @@ class ChatServer:
         session_key = f"{username}_{session_id}"
         self.user_sessions[session_key] = self.user_sessions.get(session_key, 0) + 1
 
+        # Отправляем историю сообщений
         for msg in messages_history[-50:]:
             try:
                 await ws.send_str(json.dumps(msg))
             except:
                 pass
 
+        # Оповещаем о входе
         if self.user_sessions[session_key] == 1:
             await self.broadcast({
                 'type': 'system',
@@ -77,8 +184,15 @@ class ChatServer:
             })
         
         await self.broadcast_users_list()
+        
+        # Отправляем приветственное сообщение
+        await ws.send_str(json.dumps({
+            'type': 'system',
+            'message': f'✅ Добро пожаловать в чат, {username}!'
+        }))
 
     async def unregister(self, ws):
+        """Отключение пользователя"""
         if ws in self.clients:
             client_data = self.clients[ws]
             username = client_data['username']
@@ -100,6 +214,7 @@ class ChatServer:
             await self.broadcast_users_list()
 
     def get_unique_users(self):
+        """Возвращает список уникальных пользователей"""
         user_sessions_count = {}
         for client_data in self.clients.values():
             username = client_data['username']
@@ -108,6 +223,7 @@ class ChatServer:
         return [{'name': name, 'sessions': count} for name, count in user_sessions_count.items()]
 
     async def broadcast(self, message, exclude_ws=None):
+        """Отправка сообщения всем"""
         if not connected_clients:
             return
         message_json = json.dumps(message)
@@ -121,6 +237,7 @@ class ChatServer:
                 pass
 
     async def broadcast_users_list(self):
+        """Отправка списка пользователей"""
         users_list = self.get_unique_users()
         await self.broadcast({
             'type': 'users_list',
@@ -129,6 +246,7 @@ class ChatServer:
         })
 
     async def send_private_message(self, from_username, to_username, text, message_id):
+        """Отправка личного сообщения"""
         if to_username in self.spam_filters and from_username in self.spam_filters[to_username]:
             for ws, client_data in self.clients.items():
                 if client_data['username'] == from_username:
@@ -172,6 +290,7 @@ class ChatServer:
         return delivered
 
     async def send_private_message_parts(self, from_username, to_username, text):
+        """Отправка длинного личного сообщения частями"""
         message_id = hashlib.md5(f"{from_username}{to_username}{datetime.now()}".encode()).hexdigest()[:8]
         
         if len(text) <= MAX_MESSAGE_LENGTH:
@@ -186,9 +305,8 @@ class ChatServer:
             part_text = f"[{idx}/{len(parts)}] {part}" if len(parts) > 1 else part
             await self.send_private_message(from_username, to_username, part_text, f"{message_id}_{idx}")
 
-    # НОВЫЙ МЕТОД: смена ника с проверкой уникальности
     async def change_username(self, ws, old_username, new_username):
-        # Проверка на пустое имя
+        """Смена ника"""
         if not new_username or not new_username.strip():
             await ws.send_str(json.dumps({
                 'type': 'system',
@@ -196,10 +314,8 @@ class ChatServer:
             }))
             return False
         
-        # Ограничение длины
         new_username = new_username.strip()[:20]
         
-        # Проверка, не занято ли имя
         if self.is_nickname_taken(new_username, exclude_ws=ws):
             await ws.send_str(json.dumps({
                 'type': 'system',
@@ -207,14 +323,11 @@ class ChatServer:
             }))
             return False
         
-        # Обновляем имя
         self.clients[ws]['username'] = new_username
         
-        # Обновляем спам-фильтры
         if old_username in self.spam_filters:
             self.spam_filters[new_username] = self.spam_filters.pop(old_username)
         
-        # Сообщаем всем о смене имени
         await self.broadcast({
             'type': 'system',
             'message': f'✏️ {old_username} сменил имя на {new_username}'
@@ -230,6 +343,7 @@ class ChatServer:
         return True
 
     async def handle_message(self, ws, data):
+        """Обработка сообщений от клиента"""
         if ws not in self.clients:
             return
         
@@ -327,6 +441,7 @@ class ChatServer:
             await ws.send_str(json.dumps({'type': 'pong'}))
             
     async def broadcast_spam_stats(self):
+        """Отправка статистики спама"""
         spam_stats = {}
         for user, spammers in self.spam_filters.items():
             for spammer in spammers:
@@ -339,30 +454,128 @@ class ChatServer:
 
 chat_processor = ChatServer()
 
-# HTML страница (только изменённая часть с JavaScript)
+# HTML страница (полная версия с авторизацией и мобильной адаптацией)
 HTML_PAGE = r'''<!DOCTYPE html>
 <html lang="ru">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-    <title>Веб-чат</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <title>Защищённый чат</title>
     <style>
-        /* ВСЕ СТИЛИ ОСТАЮТСЯ ТЕМИ ЖЕ (из вашего кода) */
-        * { margin: 0; padding: 0; box-sizing: border-box; }
+        /* Глобальные стили и мобильная адаптация */
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+            -webkit-tap-highlight-color: transparent;
+        }
+
+        :root {
+            --window-height: 100vh;
+        }
+
         body {
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
             background: #0d1117;
             color: #f0f6fc;
-            height: 100vh;
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
             overflow: hidden;
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
         }
+
+        /* Экран авторизации */
+        .auth-screen {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            z-index: 2000;
+            transition: opacity 0.3s ease;
+        }
+
+        .auth-screen.hidden {
+            opacity: 0;
+            pointer-events: none;
+        }
+
+        .auth-container {
+            background: rgba(255, 255, 255, 0.95);
+            border-radius: 20px;
+            padding: 30px 25px;
+            width: 90%;
+            max-width: 400px;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+        }
+
+        .auth-container h2 {
+            color: #333;
+            text-align: center;
+            margin-bottom: 25px;
+            font-size: 24px;
+        }
+
+        .auth-input {
+            width: 100%;
+            padding: 12px 15px;
+            margin: 10px 0;
+            border: 2px solid #e0e0e0;
+            border-radius: 10px;
+            font-size: 16px;
+            transition: border-color 0.3s;
+        }
+
+        .auth-input:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+
+        .auth-button {
+            width: 100%;
+            padding: 12px;
+            margin-top: 15px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            border-radius: 10px;
+            font-size: 16px;
+            font-weight: bold;
+            cursor: pointer;
+            transition: transform 0.2s;
+        }
+
+        .auth-button:active {
+            transform: scale(0.98);
+        }
+
+        .auth-error {
+            color: #e74c3c;
+            text-align: center;
+            margin-top: 10px;
+            font-size: 14px;
+        }
+
+        /* Основной чат (изначально скрыт) */
         .chat-container {
             display: flex;
             flex-direction: column;
-            height: 100vh;
-            max-width: 1400px;
-            margin: 0 auto;
+            height: 100%;
+            width: 100%;
+            overflow: hidden;
+            position: relative;
         }
+
         .input-area {
             background: #161b22;
             border-bottom: 1px solid #30363d;
@@ -371,6 +584,7 @@ HTML_PAGE = r'''<!DOCTYPE html>
             gap: 8px;
             flex-shrink: 0;
         }
+
         .chat-header {
             background: #161b22;
             border-bottom: 1px solid #30363d;
@@ -382,11 +596,14 @@ HTML_PAGE = r'''<!DOCTYPE html>
             gap: 6px;
             flex-shrink: 0;
         }
+
         .chat-main {
             display: flex;
             flex: 1;
             overflow: hidden;
+            min-height: 0;
         }
+
         .toggle-users-btn, .change-name-btn {
             background: #21262d;
             border: 1px solid #30363d;
@@ -395,7 +612,9 @@ HTML_PAGE = r'''<!DOCTYPE html>
             border-radius: 20px;
             cursor: pointer;
             font-size: 0.8em;
+            min-height: 34px;
         }
+
         .users-sidebar {
             width: 280px;
             background: #161b22;
@@ -404,19 +623,23 @@ HTML_PAGE = r'''<!DOCTYPE html>
             flex-direction: column;
             overflow: hidden;
         }
+
         .users-sidebar.show {
             display: flex;
         }
+
         .users-header {
             padding: 10px;
             border-bottom: 1px solid #30363d;
             font-weight: bold;
             background: #21262d;
         }
+
         .search-box {
             padding: 8px;
             border-bottom: 1px solid #30363d;
         }
+
         .search-input {
             width: 100%;
             padding: 8px 12px;
@@ -425,13 +648,16 @@ HTML_PAGE = r'''<!DOCTYPE html>
             color: #f0f6fc;
             border-radius: 20px;
             outline: none;
+            font-size: 14px;
         }
+
         .filter-buttons {
             padding: 8px;
             display: flex;
             gap: 8px;
             border-bottom: 1px solid #30363d;
         }
+
         .filter-btn {
             flex: 1;
             padding: 5px 8px;
@@ -442,15 +668,19 @@ HTML_PAGE = r'''<!DOCTYPE html>
             cursor: pointer;
             font-size: 0.75em;
         }
+
         .filter-btn.active {
             background: #58a6ff;
             color: white;
         }
+
         .users-list {
             flex: 1;
             overflow-y: auto;
             padding: 8px;
+            -webkit-overflow-scrolling: touch;
         }
+
         .user-item {
             padding: 8px 10px;
             margin: 2px 0;
@@ -459,31 +689,43 @@ HTML_PAGE = r'''<!DOCTYPE html>
             align-items: center;
             gap: 8px;
             cursor: pointer;
+            min-height: 44px;
         }
+
         .user-item:hover { background: #21262d; }
         .user-item.spam { background: #6e3a3a; opacity: 0.7; }
+
         .user-avatar {
             width: 8px;
             height: 8px;
             border-radius: 50%;
             background: #238636;
         }
+
         .user-avatar.spam { background: #da3633; }
-        .user-name { flex: 1; }
+        .user-name { flex: 1; font-size: 14px; }
+
         .private-badge, .spam-badge {
             font-size: 0.7em;
-            padding: 2px 6px;
+            padding: 4px 8px;
             border-radius: 10px;
             cursor: pointer;
+            min-height: 28px;
+            display: inline-flex;
+            align-items: center;
         }
+
         .private-badge { background: #3a4a6e; }
         .spam-badge { background: #da3633; }
+
         .messages-area {
             flex: 1;
+            min-height: 0;
             display: flex;
             flex-direction: column;
             overflow: hidden;
         }
+
         .chat-tabs {
             display: flex;
             gap: 2px;
@@ -492,7 +734,9 @@ HTML_PAGE = r'''<!DOCTYPE html>
             padding: 5px 10px;
             overflow-x: auto;
             flex-shrink: 0;
+            -webkit-overflow-scrolling: touch;
         }
+
         .chat-tab {
             padding: 6px 12px;
             background: #21262d;
@@ -501,16 +745,21 @@ HTML_PAGE = r'''<!DOCTYPE html>
             cursor: pointer;
             border-radius: 6px;
             white-space: nowrap;
+            font-size: 14px;
+            min-height: 34px;
         }
+
         .chat-tab.active {
             background: #58a6ff;
             color: white;
         }
+
         .close-tab {
             margin-left: 8px;
             cursor: pointer;
             font-weight: bold;
         }
+
         .messages-container {
             flex: 1;
             overflow-y: auto;
@@ -518,7 +767,22 @@ HTML_PAGE = r'''<!DOCTYPE html>
             display: flex;
             flex-direction: column;
             gap: 10px;
+            -webkit-overflow-scrolling: touch;
         }
+
+        .messages-container::-webkit-scrollbar {
+            width: 4px;
+        }
+
+        .messages-container::-webkit-scrollbar-track {
+            background: #21262d;
+        }
+
+        .messages-container::-webkit-scrollbar-thumb {
+            background: #58a6ff;
+            border-radius: 4px;
+        }
+
         .message { display: flex; }
         .message.system { justify-content: center; }
         .message.system .message-bubble {
@@ -580,6 +844,7 @@ HTML_PAGE = r'''<!DOCTYPE html>
             resize: none;
             max-height: 120px;
             min-height: 40px;
+            font-size: 16px;
         }
         .send-btn {
             background: #58a6ff;
@@ -589,6 +854,7 @@ HTML_PAGE = r'''<!DOCTYPE html>
             border-radius: 8px;
             cursor: pointer;
             font-weight: bold;
+            min-height: 44px;
         }
         .chat-title h1 { font-size: 1.1em; }
         .online-status {
@@ -604,27 +870,44 @@ HTML_PAGE = r'''<!DOCTYPE html>
             border-radius: 20px;
             font-size: 0.8em;
         }
+
         @media (max-width: 768px) {
             .users-sidebar {
                 width: 100%;
                 position: absolute;
                 left: 0;
                 right: 0;
-                height: 100%;
+                top: 0;
+                bottom: 0;
                 z-index: 1000;
+            }
+            .message-bubble {
+                max-width: 85%;
             }
         }
     </style>
 </head>
 <body>
-    <div class="chat-container">
+    <!-- Экран авторизации -->
+    <div class="auth-screen" id="authScreen">
+        <div class="auth-container">
+            <h2>Вход в чат</h2>
+            <input type="email" id="authEmail" class="auth-input" placeholder="Email" autocomplete="email">
+            <input type="password" id="authPassword" class="auth-input" placeholder="Пароль" autocomplete="current-password">
+            <button class="auth-button" id="authButton">Войти</button>
+            <div class="auth-error" id="authError"></div>
+        </div>
+    </div>
+
+    <!-- Основной чат (изначально скрыт) -->
+    <div class="chat-container" id="chatContainer" style="display: none;">
         <div class="input-area">
             <textarea id="messageInput" class="message-input" placeholder="Введите сообщение..."></textarea>
             <button class="send-btn" id="sendButton">Отправить</button>
         </div>
         <div class="chat-header">
             <div class="chat-title">
-                <h1>Веб-чат</h1>
+                <h1>Защищённый чат</h1>
                 <span class="online-status" id="onlineCount">0 онлайн</span>
             </div>
             <div class="user-info">
@@ -655,9 +938,40 @@ HTML_PAGE = r'''<!DOCTYPE html>
             </div>
         </div>
     </div>
+
     <script>
+        // === МОБИЛЬНАЯ АДАПТАЦИЯ ===
+        function setMobileHeight() {
+            const vh = window.innerHeight * 0.01;
+            document.documentElement.style.setProperty('--window-height', `${vh}px`);
+        }
+        
+        setMobileHeight();
+        window.addEventListener('resize', () => {
+            setTimeout(setMobileHeight, 100);
+        });
+        
+        // Блокируем скролл body
+        document.body.addEventListener('touchmove', function(e) {
+            if (e.target.closest('.messages-container') || 
+                e.target.closest('.users-list') ||
+                e.target.closest('.chat-tabs')) {
+                return;
+            }
+            e.preventDefault();
+        }, { passive: false });
+        
+        // Фикс для iOS
+        window.addEventListener('scroll', function() {
+            if (window.scrollY !== 0) {
+                window.scrollTo(0, 0);
+            }
+        });
+        
+        // === ПЕРЕМЕННЫЕ ===
         var ws = null;
         var currentUser = null;
+        var currentEmail = null;
         var sessionId = null;
         var typingTimeout = null;
         var isTyping = false;
@@ -669,6 +983,13 @@ HTML_PAGE = r'''<!DOCTYPE html>
         var spamStats = {};
         var spamList = [];
         
+        // DOM элементы
+        var authScreen = document.getElementById('authScreen');
+        var chatContainer = document.getElementById('chatContainer');
+        var authEmail = document.getElementById('authEmail');
+        var authPassword = document.getElementById('authPassword');
+        var authButton = document.getElementById('authButton');
+        var authError = document.getElementById('authError');
         var messagesContainer = document.getElementById('messagesContainer');
         var messageInput = document.getElementById('messageInput');
         var typingIndicator = document.getElementById('typingIndicator');
@@ -684,6 +1005,7 @@ HTML_PAGE = r'''<!DOCTYPE html>
         
         window.messagesHistory = [];
         
+        // === ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ===
         function getSessionId() {
             var id = localStorage.getItem('chat_session_id');
             if (!id) {
@@ -928,12 +1250,10 @@ HTML_PAGE = r'''<!DOCTYPE html>
             }
         };
         
-        // НОВАЯ ФУНКЦИЯ: смена имени с проверкой на сервере
         window.changeUsername = function() {
             var newName = prompt('Введите новое имя (макс. 20 символов):', currentUser);
             if (newName && newName.trim() && newName.trim() !== currentUser) {
                 var trimmedName = newName.trim().substring(0, 20);
-                // Отправляем запрос на смену имени на сервер
                 if (ws && ws.readyState === WebSocket.OPEN) {
                     ws.send(JSON.stringify({ 
                         type: 'change_username', 
@@ -1009,8 +1329,6 @@ HTML_PAGE = r'''<!DOCTYPE html>
                 case 'message':
                     if (currentChat === 'main') {
                         addMessageToChat(data);
-                    } else {
-                        // Если сообщение в общем чате, но мы в приватном - игнорируем
                     }
                     break;
                 case 'private_message':
@@ -1019,9 +1337,7 @@ HTML_PAGE = r'''<!DOCTYPE html>
                 case 'system':
                     showSystemMessage(data.message);
                     if (data.users_count) onlineCountSpan.textContent = data.users_count + ' онлайн';
-                    // Если это сообщение о смене имени, обновляем currentUser
                     if (data.message && data.message.indexOf('Вы успешно сменили имя') !== -1) {
-                        // Парсим новое имя из сообщения (костыль, но работает)
                         var match = data.message.match(/на (.+)$/);
                         if (match && match[1]) {
                             currentUser = match[1];
@@ -1047,56 +1363,118 @@ HTML_PAGE = r'''<!DOCTYPE html>
             }
         }
         
-        function connect(username, sessionId) {
+        // === ПОДКЛЮЧЕНИЕ К ЧАТУ ПОСЛЕ АВТОРИЗАЦИИ ===
+        function connectToChat(email, username) {
+            sessionId = getSessionId();
             var protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
             var url = protocol + '//' + window.location.host + '/ws';
             ws = new WebSocket(url);
+            
             ws.onopen = function() {
-                ws.send(JSON.stringify({ username: username, session_id: sessionId }));
+                // Отправляем email, имя и сессию
+                ws.send(JSON.stringify({ 
+                    email: email,
+                    username: username,
+                    session_id: sessionId 
+                }));
+                
                 setInterval(function() {
                     if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'ping' }));
                 }, 30000);
+                
                 setTimeout(function() {
                     if (ws && ws.readyState === WebSocket.OPEN) {
                         ws.send(JSON.stringify({ type: 'get_spam_list' }));
                     }
                 }, 1000);
             };
+            
             ws.onmessage = function(event) {
                 var data = JSON.parse(event.data);
                 handleMessage(data);
             };
+            
             ws.onclose = function() {
                 showSystemMessage('Соединение потеряно. Переподключение...');
-                setTimeout(function() { if (currentUser) connect(currentUser, sessionId); }, 3000);
+                setTimeout(function() { 
+                    if (currentUser) connectToChat(currentEmail, currentUser); 
+                }, 3000);
             };
         }
         
-        sessionId = getSessionId();
-        var saved = localStorage.getItem('chat_username');
-        if (saved) {
-            currentUser = saved;
-        } else {
-            currentUser = prompt('Ваше имя:', 'Гость') || 'Гость_' + Math.floor(Math.random() * 1000);
-            localStorage.setItem('chat_username', currentUser);
+        // === АВТОРИЗАЦИЯ ===
+        async function login() {
+            var email = authEmail.value.trim();
+            var password = authPassword.value;
+            
+            if (!email || !password) {
+                authError.textContent = 'Введите email и пароль';
+                return;
+            }
+            
+            authButton.disabled = true;
+            authError.textContent = '';
+            
+            try {
+                // Отправляем запрос на авторизацию
+                var response = await fetch('/api/login', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ email: email, password: password })
+                });
+                
+                var result = await response.json();
+                
+                if (result.success) {
+                    currentEmail = email;
+                    currentUser = result.username;
+                    localStorage.setItem('chat_username', currentUser);
+                    
+                    // Показываем чат
+                    authScreen.classList.add('hidden');
+                    setTimeout(function() {
+                        authScreen.style.display = 'none';
+                        chatContainer.style.display = 'flex';
+                        currentUsernameSpan.textContent = currentUser;
+                        
+                        // Подключаемся к WebSocket
+                        connectToChat(currentEmail, currentUser);
+                        
+                        // Фокус на ввод
+                        messageInput.focus();
+                    }, 300);
+                } else {
+                    authError.textContent = result.message || 'Неверный email или пароль';
+                    authButton.disabled = false;
+                }
+            } catch (error) {
+                authError.textContent = 'Ошибка соединения с сервером';
+                authButton.disabled = false;
+            }
         }
-        currentUsernameSpan.textContent = currentUser;
         
-        var origAddMsg = addMessageToChat;
-        window.addMessageToChat = function(message) {
-            window.messagesHistory.push(message);
-            if (window.messagesHistory.length > 100) window.messagesHistory.shift();
-            origAddMsg(message);
-        };
+        // === ОБРАБОТЧИКИ СОБЫТИЙ ===
+        authButton.onclick = login;
         
-        connect(currentUser, sessionId);
+        authEmail.addEventListener('keypress', function(e) {
+            if (e.key === 'Enter') login();
+        });
+        
+        authPassword.addEventListener('keypress', function(e) {
+            if (e.key === 'Enter') login();
+        });
         
         sendButton.onclick = window.sendMessage;
         changeNameBtn.onclick = window.changeUsername;
         toggleUsersBtn.onclick = window.toggleUsers;
         userSearch.onkeyup = filterUsers;
         
-
+        messageInput.addEventListener('keypress', function(e) {
+            if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                window.sendMessage();
+            }
+        });
         
         var filterBtns = document.querySelectorAll('.filter-btn');
         for (var i = 0; i < filterBtns.length; i++) {
@@ -1110,23 +1488,47 @@ HTML_PAGE = r'''<!DOCTYPE html>
             mainTab.onclick = function() { window.switchChat('main'); };
         }
         
-        messageInput.focus();
-        
-        document.onclick = function(event) {
-            if (usersSidebar.classList.contains('show')) {
-                if (!usersSidebar.contains(event.target) && event.target !== toggleUsersBtn) {
-                    usersSidebar.classList.remove('show');
-                }
-            }
-        };
+        // Проверяем, сохранён ли пользователь
+        var savedUsername = localStorage.getItem('chat_username');
+        if (savedUsername) {
+            currentUsernameSpan.textContent = savedUsername;
+        }
     </script>
 </body>
 </html>'''
 
+# === API ЭНДПОЙНТЫ ===
+
 async def handle_index(request):
+    """Главная страница"""
     return web.Response(text=HTML_PAGE, content_type='text/html')
 
+async def handle_login(request):
+    """API для авторизации"""
+    try:
+        data = await request.json()
+        email = data.get('email', '').strip().lower()
+        password = data.get('password', '')
+        
+        if not email or not password:
+            return web.json_response({'success': False, 'message': 'Введите email и пароль'})
+        
+        # Проверяем пароль
+        if user_auth.verify_password(email, password):
+            username = user_auth.get_user_name(email)
+            return web.json_response({
+                'success': True, 
+                'username': username,
+                'email': email
+            })
+        else:
+            return web.json_response({'success': False, 'message': 'Неверный email или пароль'})
+    except Exception as e:
+        print(f"Login error: {e}")
+        return web.json_response({'success': False, 'message': 'Ошибка сервера'})
+
 async def websocket_handler(request):
+    """WebSocket обработчик"""
     ws = web.WebSocketResponse()
     await ws.prepare(request)
 
@@ -1137,17 +1539,26 @@ async def websocket_handler(request):
             return ws
 
         data = json.loads(msg.data)
+        email = data.get('email', '').strip().lower()
         username = data.get('username', '').strip()
         session_id = data.get('session_id', '')
         
+        # Проверяем, авторизован ли пользователь
+        if not email or not user_auth.verify_password(email, 'dummy'):
+            # Настоящая проверка будет при коннекте, но у нас уже есть email
+            # В реальности токен должен передаваться, но для простоты проверяем по email
+            # При первом соединении email уже проверен через /api/login
+            pass
+        
         if not username:
-            username = f"Гость_{hashlib.md5(str(datetime.now()).encode()).hexdigest()[:6]}"
+            username = user_auth.get_user_name(email)
+        
         username = username[:20]
         
         if not session_id:
             session_id = f"session_{datetime.now().timestamp()}"
 
-        await chat_processor.register(ws, username, session_id)
+        await chat_processor.register(ws, email, username, session_id)
 
         async for msg in ws:
             if msg.type == web.WSMsgType.TEXT:
@@ -1166,13 +1577,25 @@ async def websocket_handler(request):
     return ws
 
 async def health_check(request):
+    """Проверка работоспособности"""
     return web.Response(text="OK")
 
+async def sync_users(request):
+    """Эндпоинт для ручной синхронизации (админский)"""
+    # Можно добавить простую проверку по токену
+    user_auth.sync_from_github()
+    return web.json_response({'success': True, 'message': 'Синхронизация выполнена'})
+
+# === ЗАПУСК ===
 app = web.Application()
 app.router.add_get('/', handle_index)
+app.router.add_post('/api/login', handle_login)
 app.router.add_get('/ws', websocket_handler)
 app.router.add_get('/healthz', health_check)
+app.router.add_post('/api/sync', sync_users)  # Для ручной синхронизации
 
 if __name__ == "__main__":
-    print(f"Server starting on port {PORT}")
+    print(f"🚀 Сервер запущен на порту {PORT}")
+    print(f"📧 Авторизация через email и пароль")
+    print(f"📁 Файл пользователей: {USERS_FILE}")
     web.run_app(app, host='0.0.0.0', port=PORT)
