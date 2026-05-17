@@ -1,14 +1,20 @@
 {
   "tutuvankabravo@gmail.com": {
-    "hash": "bccdb284130ec2e0ebbd77bf43be58ec02b2a2e1cbb95ac5043c44d6b7117275",
-    "salt": "32f10c2599fcc44088d7d402a724193beede77b7a5f7c3b64758f6d60d86d221",
-    "created": "2026-05-17 14:37:00",
-    "name": "tutuvankabravo"
+    "hash": "b0cc1aa22e5f8e0568225b903121062f2fb5147ded1feafe6ffdbc47f8b0729c",
+    "salt": "959873fa0a7fb30908d643075f5f362b2f912e96bd44321b3f7b42c8fdcbb6bf",
+    "created": "2026-05-17 15:09:56",
+    "name": "tutuvankabravo",
+    "status": "active",
+    "blocked_reason": null,
+    "blocked_at": null
   },
   "pidorasik@gmail.com": {
-    "hash": "8a95c87b618e46d4b80c7c50f9ebf9e19953923d7a77dfd82162985c85338694",
-    "salt": "f4ce96c1b22960f0808aab7c7c9b95bfd2e5a5afeb946b3c0e7e4a0906332e46",
-    "created": "2026-05-17 14:49:00",
-    "name": "pidorasik"
+    "hash": "c9e3e8b7d421ad66920bb574557c4cfb77f2ff12fcddd396bc429c1628247e00",
+    "salt": "08484233be92a2f77e01055700932e4a276db90d76d2cc43443445c81edd15de",
+    "created": "2026-05-17 15:11:02",
+    "name": "pidorasik",
+    "status": "active",
+    "blocked_reason": null,
+    "blocked_at": null
   }
 }
