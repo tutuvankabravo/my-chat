@@ -261,7 +261,8 @@ class ChatServer:
 
 chat_processor = ChatServer()
 
-HTML_PAGE = '''<!DOCTYPE html>
+# ВАЖНО: Используем raw-строку (r'''...''') для правильной обработки JavaScript
+HTML_PAGE = r'''<!DOCTYPE html>
 <html lang="ru">
 <head>
     <meta charset="UTF-8">
