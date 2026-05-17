@@ -22,9 +22,7 @@ class ChatServer:
         self.spam_filters = {}
         self.spam_scores = {}
 
-    # НОВЫЙ МЕТОД: проверка, занят ли ник
     def is_nickname_taken(self, username, exclude_ws=None):
-        """Проверяет, есть ли уже пользователь с таким ником"""
         for ws, client_data in self.clients.items():
             if exclude_ws and ws == exclude_ws:
                 continue
@@ -32,23 +30,18 @@ class ChatServer:
                 return True
         return False
 
-    # НОВЫЙ МЕТОД: генерация уникального ника
     def generate_unique_nickname(self, base_nickname):
-        """Если ник занят, добавляет число в конец"""
         if not self.is_nickname_taken(base_nickname):
             return base_nickname
-        
         counter = 1
         while self.is_nickname_taken(f"{base_nickname}{counter}"):
             counter += 1
         return f"{base_nickname}{counter}"
 
     async def register(self, ws, username, session_id):
-        # ПРОВЕРКА: если ник занят, генерируем уникальный
         original_username = username
         if self.is_nickname_taken(username):
             username = self.generate_unique_nickname(username)
-            # Сообщаем пользователю, что его ник изменён
             await ws.send_str(json.dumps({
                 'type': 'system',
                 'message': f'⚠️ Имя "{original_username}" уже занято. Вы вошли как "{username}"'
@@ -104,7 +97,6 @@ class ChatServer:
         for client_data in self.clients.values():
             username = client_data['username']
             user_sessions_count[username] = user_sessions_count.get(username, 0) + 1
-        
         return [{'name': name, 'sessions': count} for name, count in user_sessions_count.items()]
 
     async def broadcast(self, message, exclude_ws=None):
@@ -173,7 +165,6 @@ class ChatServer:
 
     async def send_private_message_parts(self, from_username, to_username, text):
         message_id = hashlib.md5(f"{from_username}{to_username}{datetime.now()}".encode()).hexdigest()[:8]
-        
         if len(text) <= MAX_MESSAGE_LENGTH:
             return await self.send_private_message(from_username, to_username, text, message_id)
         
@@ -186,9 +177,7 @@ class ChatServer:
             part_text = f"[{idx}/{len(parts)}] {part}" if len(parts) > 1 else part
             await self.send_private_message(from_username, to_username, part_text, f"{message_id}_{idx}")
 
-    # НОВЫЙ МЕТОД: смена ника с проверкой уникальности
     async def change_username(self, ws, old_username, new_username):
-        # Проверка на пустое имя
         if not new_username or not new_username.strip():
             await ws.send_str(json.dumps({
                 'type': 'system',
@@ -196,10 +185,8 @@ class ChatServer:
             }))
             return False
         
-        # Ограничение длины
         new_username = new_username.strip()[:20]
         
-        # Проверка, не занято ли имя
         if self.is_nickname_taken(new_username, exclude_ws=ws):
             await ws.send_str(json.dumps({
                 'type': 'system',
@@ -207,14 +194,11 @@ class ChatServer:
             }))
             return False
         
-        # Обновляем имя
         self.clients[ws]['username'] = new_username
         
-        # Обновляем спам-фильтры
         if old_username in self.spam_filters:
             self.spam_filters[new_username] = self.spam_filters.pop(old_username)
         
-        # Сообщаем всем о смене имени
         await self.broadcast({
             'type': 'system',
             'message': f'✏️ {old_username} сменил имя на {new_username}'
@@ -226,7 +210,6 @@ class ChatServer:
             'type': 'system',
             'message': f'✅ Вы успешно сменили имя на {new_username}'
         }))
-        
         return True
 
     async def handle_message(self, ws, data):
@@ -235,7 +218,6 @@ class ChatServer:
         
         client_data = self.clients[ws]
         username = client_data['username']
-
         msg_type = data.get('type', 'message')
 
         if msg_type == 'message':
@@ -284,6 +266,49 @@ class ChatServer:
             if to_username:
                 await self.send_private_message_parts(username, to_username, text)
 
+        # === ОБРАБОТКА ЗВОНКОВ ===
+        elif msg_type == 'call_offer':
+            target = data.get('to')
+            for client_ws, client_data in self.clients.items():
+                if client_data['username'] == target:
+                    await client_ws.send_str(json.dumps({
+                        'type': 'call_offer',
+                        'from': username,
+                        'offer': data.get('offer')
+                    }))
+                    break
+
+        elif msg_type == 'call_answer':
+            target = data.get('to')
+            for client_ws, client_data in self.clients.items():
+                if client_data['username'] == target:
+                    await client_ws.send_str(json.dumps({
+                        'type': 'call_answer',
+                        'from': username,
+                        'answer': data.get('answer')
+                    }))
+                    break
+
+        elif msg_type == 'call_reject':
+            target = data.get('to')
+            for client_ws, client_data in self.clients.items():
+                if client_data['username'] == target:
+                    await client_ws.send_str(json.dumps({
+                        'type': 'system',
+                        'message': f'📞 {username} отклонил звонок'
+                    }))
+                    break
+
+        elif msg_type == 'call_end':
+            target = data.get('to')
+            for client_ws, client_data in self.clients.items():
+                if client_data['username'] == target:
+                    await client_ws.send_str(json.dumps({
+                        'type': 'system',
+                        'message': f'📞 {username} завершил звонок'
+                    }))
+                    break
+
         elif msg_type == 'typing':
             await self.broadcast({
                 'type': 'typing',
@@ -331,7 +356,6 @@ class ChatServer:
         for user, spammers in self.spam_filters.items():
             for spammer in spammers:
                 spam_stats[spammer] = spam_stats.get(spammer, 0) + 1
-        
         await self.broadcast({
             'type': 'spam_stats',
             'stats': spam_stats
@@ -339,15 +363,13 @@ class ChatServer:
 
 chat_processor = ChatServer()
 
-# HTML страница (только изменённая часть с JavaScript)
 HTML_PAGE = r'''<!DOCTYPE html>
 <html lang="ru">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-    <title>Веб-чат</title>
+    <title>Веб-чат с звонками</title>
     <style>
-        /* ВСЕ СТИЛИ ОСТАЮТСЯ ТЕМИ ЖЕ (из вашего кода) */
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
@@ -458,7 +480,6 @@ HTML_PAGE = r'''<!DOCTYPE html>
             display: flex;
             align-items: center;
             gap: 8px;
-            cursor: pointer;
         }
         .user-item:hover { background: #21262d; }
         .user-item.spam { background: #6e3a3a; opacity: 0.7; }
@@ -469,7 +490,19 @@ HTML_PAGE = r'''<!DOCTYPE html>
             background: #238636;
         }
         .user-avatar.spam { background: #da3633; }
-        .user-name { flex: 1; }
+        .user-name { flex: 1; font-size: 0.85em; }
+        .call-btn {
+            background: #238636;
+            border: none;
+            border-radius: 15px;
+            padding: 4px 10px;
+            cursor: pointer;
+            font-size: 0.75em;
+            color: white;
+        }
+        .call-btn.ongoing {
+            background: #da3633;
+        }
         .private-badge, .spam-badge {
             font-size: 0.7em;
             padding: 2px 6px;
@@ -669,6 +702,9 @@ HTML_PAGE = r'''<!DOCTYPE html>
         var spamStats = {};
         var spamList = [];
         
+        // Переменные для звонков
+        var activeCalls = new Map();
+        
         var messagesContainer = document.getElementById('messagesContainer');
         var messageInput = document.getElementById('messageInput');
         var typingIndicator = document.getElementById('typingIndicator');
@@ -838,6 +874,179 @@ HTML_PAGE = r'''<!DOCTYPE html>
             usersSidebar.classList.remove('show');
         };
         
+        // ========== ФУНКЦИИ ЗВОНКОВ ==========
+        
+        window.startCall = async function(targetUsername) {
+            if (targetUsername === currentUser) {
+                showSystemMessage('Нельзя позвонить самому себе');
+                return;
+            }
+            
+            if (activeCalls.has(targetUsername)) {
+                showSystemMessage('У вас уже есть активный звонок с этим пользователем');
+                return;
+            }
+            
+            try {
+                showSystemMessage('📞 Запрашиваем доступ к микрофону...');
+                const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                
+                const pc = new RTCPeerConnection({
+                    iceServers: [
+                        { urls: 'stun:stun.l.google.com:19302' },
+                        { urls: 'stun:stun1.l.google.com:19302' }
+                    ]
+                });
+                
+                stream.getTracks().forEach(track => pc.addTrack(track, stream));
+                activeCalls.set(targetUsername, { pc, stream });
+                
+                pc.ontrack = (event) => {
+                    const audio = new Audio();
+                    audio.srcObject = event.streams[0];
+                    audio.autoplay = true;
+                    showSystemMessage(`📞 Разговор с ${targetUsername} начался`);
+                    
+                    // Кнопка завершения звонка в списке пользователей
+                    updateCallButton(targetUsername, true);
+                };
+                
+                pc.oniceconnectionstatechange = () => {
+                    if (pc.iceConnectionState === 'disconnected' || pc.iceConnectionState === 'failed' || pc.iceConnectionState === 'closed') {
+                        endCall(targetUsername);
+                    }
+                };
+                
+                const offer = await pc.createOffer();
+                await pc.setLocalDescription(offer);
+                
+                ws.send(JSON.stringify({
+                    type: 'call_offer',
+                    to: targetUsername,
+                    offer: { sdp: offer.sdp, type: offer.type }
+                }));
+                
+                showSystemMessage(`📞 Звоним ${targetUsername}...`);
+                updateCallButton(targetUsername, true);
+                
+            } catch (error) {
+                console.error('Ошибка звонка:', error);
+                showSystemMessage('❌ Не удалось начать звонок (нет доступа к микрофону)');
+                if (activeCalls.has(targetUsername)) {
+                    activeCalls.delete(targetUsername);
+                }
+                updateCallButton(targetUsername, false);
+            }
+        };
+        
+        window.endCall = function(targetUsername) {
+            const call = activeCalls.get(targetUsername);
+            if (call) {
+                if (call.stream) {
+                    call.stream.getTracks().forEach(track => track.stop());
+                }
+                if (call.pc) {
+                    call.pc.close();
+                }
+                activeCalls.delete(targetUsername);
+            }
+            
+            ws.send(JSON.stringify({
+                type: 'call_end',
+                to: targetUsername
+            }));
+            
+            showSystemMessage(`📞 Звонок с ${targetUsername} завершен`);
+            updateCallButton(targetUsername, false);
+        };
+        
+        async function answerCall(fromUsername, offer) {
+            if (!confirm(`📞 ${fromUsername} звонит вам. Принять звонок?`)) {
+                ws.send(JSON.stringify({
+                    type: 'call_reject',
+                    to: fromUsername
+                }));
+                return;
+            }
+            
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                const pc = new RTCPeerConnection({
+                    iceServers: [
+                        { urls: 'stun:stun.l.google.com:19302' },
+                        { urls: 'stun:stun1.l.google.com:19302' }
+                    ]
+                });
+                
+                stream.getTracks().forEach(track => pc.addTrack(track, stream));
+                activeCalls.set(fromUsername, { pc, stream });
+                
+                pc.ontrack = (event) => {
+                    const audio = new Audio();
+                    audio.srcObject = event.streams[0];
+                    audio.autoplay = true;
+                    showSystemMessage(`📞 Разговор с ${fromUsername} начался`);
+                    updateCallButton(fromUsername, true);
+                };
+                
+                pc.oniceconnectionstatechange = () => {
+                    if (pc.iceConnectionState === 'disconnected' || pc.iceConnectionState === 'failed' || pc.iceConnectionState === 'closed') {
+                        endCall(fromUsername);
+                    }
+                };
+                
+                await pc.setRemoteDescription(new RTCSessionDescription(offer));
+                const answer = await pc.createAnswer();
+                await pc.setLocalDescription(answer);
+                
+                ws.send(JSON.stringify({
+                    type: 'call_answer',
+                    to: fromUsername,
+                    answer: { sdp: answer.sdp, type: answer.type }
+                }));
+                
+                updateCallButton(fromUsername, true);
+                
+            } catch (error) {
+                console.error('Ошибка ответа:', error);
+                showSystemMessage('❌ Не удалось ответить на звонок');
+                updateCallButton(fromUsername, false);
+            }
+        }
+        
+        function updateCallButton(username, isCallActive) {
+            // Обновляем кнопку в списке пользователей
+            const userItems = document.querySelectorAll('.user-item');
+            for (let item of userItems) {
+                const nameElem = item.querySelector('.user-name');
+                if (nameElem && nameElem.textContent.startsWith(username)) {
+                    let callBtn = item.querySelector('.call-btn');
+                    if (!callBtn && isCallActive) {
+                        // Создаем кнопку завершения
+                        callBtn = document.createElement('button');
+                        callBtn.className = 'call-btn ongoing';
+                        callBtn.textContent = '🔴 Положить';
+                        callBtn.onclick = (e) => {
+                            e.stopPropagation();
+                            window.endCall(username);
+                        };
+                        item.appendChild(callBtn);
+                    } else if (callBtn && !isCallActive) {
+                        callBtn.remove();
+                    } else if (callBtn && isCallActive) {
+                        callBtn.textContent = '🔴 Положить';
+                        callBtn.className = 'call-btn ongoing';
+                        callBtn.onclick = (e) => {
+                            e.stopPropagation();
+                            window.endCall(username);
+                        };
+                    }
+                }
+            }
+        }
+        
+        // ========== КОНЕЦ ФУНКЦИЙ ЗВОНКОВ ==========
+        
         function isSpamUser(username) {
             for (var i = 0; i < spamList.length; i++) {
                 if (spamList[i] === username) return true;
@@ -874,17 +1083,29 @@ HTML_PAGE = r'''<!DOCTYPE html>
                 var sessionsHtml = (user.sessions > 1) ? ' (' + user.sessions + ' вкладки)' : '';
                 var spamCount = spamStats[user.name] || 0;
                 var statsHtml = spamCount > 0 ? ' ⚠️' + spamCount : '';
-                var onClick = isCurrent ? '' : ' onclick="startPrivateChat(\'' + escapeHtml(user.name) + '\')"';
-                var onSpam = !isCurrent ? ' onclick="event.stopPropagation(); toggleSpam(\'' + escapeHtml(user.name) + '\')"' : '';
-                var badgeText = isSpam ? 'Снять спам' : 'Спам';
-                var badgeClass = isSpam ? 'spam-badge' : 'private-badge';
-                html += '<div class="user-item ' + (isSpam ? 'spam' : '') + '"' + onClick + '>';
+                var isOnCall = activeCalls.has(user.name);
+                
+                html += '<div class="user-item ' + (isSpam ? 'spam' : '') + '" onclick="' + (isCurrent ? '' : 'startPrivateChat(\'' + escapeHtml(user.name) + '\')') + '">';
                 html += '<div class="user-avatar ' + (isSpam ? 'spam' : '') + '"></div>';
                 html += '<div class="user-name">' + escapeHtml(user.name) + (isCurrent ? ' (Вы)' : '') + sessionsHtml + statsHtml + '</div>';
-                if (!isCurrent) html += '<span class="' + badgeClass + '"' + onSpam + '>' + badgeText + '</span>';
+                
+                if (!isCurrent) {
+                    html += '<button class="call-btn" onclick="event.stopPropagation(); startCall(\'' + escapeHtml(user.name) + '\')">📞 Звонок</button>';
+                }
+                
+                if (!isCurrent) {
+                    var badgeText = isSpam ? 'Снять спам' : 'Спам';
+                    var badgeClass = isSpam ? 'spam-badge' : 'private-badge';
+                    html += '<span class="' + badgeClass + '" onclick="event.stopPropagation(); toggleSpam(\'' + escapeHtml(user.name) + '\')">' + badgeText + '</span>';
+                }
                 html += '</div>';
             }
             usersList.innerHTML = html;
+            
+            // Восстанавливаем состояние кнопок звонков
+            for (var [username, call] of activeCalls) {
+                updateCallButton(username, true);
+            }
         }
         
         window.toggleSpam = function(username) {
@@ -928,12 +1149,10 @@ HTML_PAGE = r'''<!DOCTYPE html>
             }
         };
         
-        // НОВАЯ ФУНКЦИЯ: смена имени с проверкой на сервере
         window.changeUsername = function() {
             var newName = prompt('Введите новое имя (макс. 20 символов):', currentUser);
             if (newName && newName.trim() && newName.trim() !== currentUser) {
                 var trimmedName = newName.trim().substring(0, 20);
-                // Отправляем запрос на смену имени на сервер
                 if (ws && ws.readyState === WebSocket.OPEN) {
                     ws.send(JSON.stringify({ 
                         type: 'change_username', 
@@ -1009,8 +1228,6 @@ HTML_PAGE = r'''<!DOCTYPE html>
                 case 'message':
                     if (currentChat === 'main') {
                         addMessageToChat(data);
-                    } else {
-                        // Если сообщение в общем чате, но мы в приватном - игнорируем
                     }
                     break;
                 case 'private_message':
@@ -1019,9 +1236,7 @@ HTML_PAGE = r'''<!DOCTYPE html>
                 case 'system':
                     showSystemMessage(data.message);
                     if (data.users_count) onlineCountSpan.textContent = data.users_count + ' онлайн';
-                    // Если это сообщение о смене имени, обновляем currentUser
                     if (data.message && data.message.indexOf('Вы успешно сменили имя') !== -1) {
-                        // Парсим новое имя из сообщения (костыль, но работает)
                         var match = data.message.match(/на (.+)$/);
                         if (match && match[1]) {
                             currentUser = match[1];
@@ -1043,6 +1258,17 @@ HTML_PAGE = r'''<!DOCTYPE html>
                 case 'spam_stats':
                     spamStats = data.stats || {};
                     filterUsers();
+                    break;
+                    
+                // Обработка звонков
+                case 'call_offer':
+                    answerCall(data.from, data.offer);
+                    break;
+                case 'call_answer':
+                    var call = activeCalls.get(data.from);
+                    if (call && call.pc) {
+                        call.pc.setRemoteDescription(new RTCSessionDescription(data.answer));
+                    }
                     break;
             }
         }
@@ -1096,7 +1322,8 @@ HTML_PAGE = r'''<!DOCTYPE html>
         toggleUsersBtn.onclick = window.toggleUsers;
         userSearch.onkeyup = filterUsers;
         
-
+        // Убрали отправку по Enter, оставили только кнопку
+        // messageInput.onkeydown = ... (удалено)
         
         var filterBtns = document.querySelectorAll('.filter-btn');
         for (var i = 0; i < filterBtns.length; i++) {
