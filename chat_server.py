@@ -268,6 +268,14 @@ class ChatServer:
 
         elif msg_type == 'call_offer':
             target = data.get('to')
+            # Проверяем, не в черном ли списке звонящий
+            if target in self.spam_filters and username in self.spam_filters[target]:
+                await ws.send_str(json.dumps({
+                    'type': 'system',
+                    'message': f'⚠️ Вы не можете позвонить {target}: вы в черном списке'
+                }))
+                return
+            
             for client_ws, client_data in self.clients.items():
                 if client_data['username'] == target:
                     await client_ws.send_str(json.dumps({
@@ -491,17 +499,26 @@ HTML_PAGE = r'''<!DOCTYPE html>
         }
         .user-avatar.spam { background: #da3633; }
         .user-name { flex: 1; font-size: 0.85em; }
-        .call-btn, .reject-btn {
+        .call-btn {
             border: none;
             border-radius: 15px;
             padding: 4px 10px;
             cursor: pointer;
             font-size: 0.7em;
             color: white;
+            background: #238636;
         }
-        .call-btn { background: #238636; }
         .call-btn.ongoing { background: #da3633; }
-        .reject-btn { background: #da3633; margin-left: 5px; }
+        .reject-btn {
+            border: none;
+            border-radius: 15px;
+            padding: 4px 10px;
+            cursor: pointer;
+            font-size: 0.7em;
+            color: white;
+            background: #da3633;
+            margin-left: 5px;
+        }
         .private-badge, .spam-badge {
             font-size: 0.7em;
             padding: 2px 6px;
@@ -542,6 +559,27 @@ HTML_PAGE = r'''<!DOCTYPE html>
             margin-left: 8px;
             cursor: pointer;
             font-weight: bold;
+        }
+        .chat-header-info {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        .chat-call-btn {
+            background: #238636;
+            border: none;
+            color: white;
+            padding: 5px 12px;
+            border-radius: 20px;
+            cursor: pointer;
+            font-size: 0.8em;
+        }
+        .chat-call-btn.ongoing {
+            background: #da3633;
+        }
+        .chat-call-btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
         }
         .messages-container {
             flex: 1;
@@ -746,7 +784,6 @@ HTML_PAGE = r'''<!DOCTYPE html>
         }
         
         function showSystemMessage(text) {
-            if (currentChat !== 'main') return;
             var div = document.createElement('div');
             div.className = 'message system';
             div.innerHTML = '<div class="message-bubble">' + escapeHtml(text) + '</div>';
@@ -755,6 +792,7 @@ HTML_PAGE = r'''<!DOCTYPE html>
         }
         
         function addMessageToChat(message) {
+            if (currentChat !== 'main') return;
             var div = document.createElement('div');
             div.className = 'message ' + (message.username === currentUser ? 'own' : '');
             var textWithBreaks = escapeHtml(message.text).split(/\n/).join('<br>');
@@ -764,6 +802,7 @@ HTML_PAGE = r'''<!DOCTYPE html>
         }
         
         function addPrivateMessageToChat(message, otherUser) {
+            if (currentChat !== otherUser) return;
             var div = document.createElement('div');
             var isFromMe = (message.from === currentUser);
             div.className = 'message ' + (isFromMe ? 'own' : '');
@@ -772,6 +811,32 @@ HTML_PAGE = r'''<!DOCTYPE html>
             div.innerHTML = '<div class="message-bubble"><div class="message-username">' + escapeHtml(sender) + '</div><div class="message-text">' + textWithBreaks + '</div><div class="message-time">' + formatTime(message.timestamp) + '</div></div>';
             messagesContainer.appendChild(div);
             scrollToBottom();
+        }
+        
+        function updateChatHeaderCallButton() {
+            var chatHeader = document.querySelector('.chat-tabs');
+            if (!chatHeader) return;
+            
+            // Удаляем старую кнопку если есть
+            var oldBtn = document.getElementById('chatCallBtn');
+            if (oldBtn) oldBtn.remove();
+            
+            if (currentChat !== 'main') {
+                var headerDiv = document.querySelector('.chat-tabs');
+                var callBtn = document.createElement('button');
+                callBtn.id = 'chatCallBtn';
+                var isCallActive = activeCalls.has(currentChat);
+                callBtn.textContent = isCallActive ? '🔴 Положить трубку' : '📞 Позвонить';
+                callBtn.className = 'chat-call-btn' + (isCallActive ? ' ongoing' : '');
+                callBtn.onclick = function() {
+                    if (isCallActive) {
+                        window.endCall(currentChat);
+                    } else {
+                        window.startCall(currentChat);
+                    }
+                };
+                headerDiv.appendChild(callBtn);
+            }
         }
         
         function showNotification(username) {
@@ -819,6 +884,10 @@ HTML_PAGE = r'''<!DOCTYPE html>
         }
         
         window.closePrivateChat = function(username) {
+            // Завершаем звонок если он активен
+            if (activeCalls.has(username)) {
+                window.endCall(username);
+            }
             privateChats.delete(username);
             var tabsContainer = document.getElementById('chatTabs');
             var tabToRemove = null;
@@ -857,11 +926,21 @@ HTML_PAGE = r'''<!DOCTYPE html>
                 }
             }
             scrollToBottom();
+            updateChatHeaderCallButton();
         };
         
         window.startPrivateChat = function(username) {
             if (username === currentUser) {
                 showSystemMessage('Нельзя начать чат с самим собой');
+                return;
+            }
+            // Проверяем черный список
+            var isSpam = false;
+            for (var i = 0; i < spamList.length; i++) {
+                if (spamList[i] === username) isSpam = true;
+            }
+            if (isSpam) {
+                showSystemMessage('⚠️ Нельзя открыть чат с пользователем из черного списка');
                 return;
             }
             if (!privateChats.has(username)) {
@@ -875,36 +954,12 @@ HTML_PAGE = r'''<!DOCTYPE html>
         // ========== ЗВОНКИ ==========
         
         function updateCallButton(username, isCallActive) {
-            var userItems = document.querySelectorAll('.user-item');
-            for (var i = 0; i < userItems.length; i++) {
-                var item = userItems[i];
-                var nameElem = item.querySelector('.user-name');
-                if (nameElem && nameElem.textContent.startsWith(username)) {
-                    var oldCallBtn = item.querySelector('.call-btn');
-                    if (oldCallBtn) oldCallBtn.remove();
-                    var oldRejectBtn = item.querySelector('.reject-btn');
-                    if (oldRejectBtn) oldRejectBtn.remove();
-                    
-                    if (isCallActive) {
-                        var endBtn = document.createElement('button');
-                        endBtn.textContent = '🔴 Положить';
-                        endBtn.className = 'call-btn ongoing';
-                        endBtn.onclick = (function(u) { return function(e) {
-                            e.stopPropagation();
-                            window.endCall(u);
-                        }; })(username);
-                        item.appendChild(endBtn);
-                    } else {
-                        var callBtn = document.createElement('button');
-                        callBtn.textContent = '📞 Звонок';
-                        callBtn.className = 'call-btn';
-                        callBtn.onclick = (function(u) { return function(e) {
-                            e.stopPropagation();
-                            window.startCall(u);
-                        }; })(username);
-                        item.appendChild(callBtn);
-                    }
-                    break;
+            // Обновляем кнопку в хедере чата если этот чат открыт
+            if (currentChat === username) {
+                var callBtn = document.getElementById('chatCallBtn');
+                if (callBtn) {
+                    callBtn.textContent = isCallActive ? '🔴 Положить трубку' : '📞 Позвонить';
+                    callBtn.className = 'chat-call-btn' + (isCallActive ? ' ongoing' : '');
                 }
             }
         }
@@ -913,80 +968,64 @@ HTML_PAGE = r'''<!DOCTYPE html>
             pendingCalls.delete(fromUsername);
             ws.send(JSON.stringify({ type: 'call_reject', to: fromUsername }));
             showSystemMessage('📞 Вы отклонили звонок от ' + fromUsername);
-            
-            var userItems = document.querySelectorAll('.user-item');
-            for (var i = 0; i < userItems.length; i++) {
-                var item = userItems[i];
-                var nameElem = item.querySelector('.user-name');
-                if (nameElem && nameElem.textContent.startsWith(fromUsername)) {
-                    var oldCallBtn = item.querySelector('.call-btn');
-                    if (oldCallBtn) oldCallBtn.remove();
-                    var oldRejectBtn = item.querySelector('.reject-btn');
-                    if (oldRejectBtn) oldRejectBtn.remove();
-                    
-                    var callBtn = document.createElement('button');
-                    callBtn.textContent = '📞 Звонок';
-                    callBtn.className = 'call-btn';
-                    callBtn.onclick = (function(u) { return function(e) {
-                        e.stopPropagation();
-                        window.startCall(u);
-                    }; })(fromUsername);
-                    item.appendChild(callBtn);
-                    break;
-                }
-            }
         }
         
         function showIncomingCall(fromUsername, offer) {
-            pendingCalls.set(fromUsername, offer);
-            showSystemMessage('📞 ' + fromUsername + ' звонит вам! Нажмите "Ответить" в списке пользователей');
+            // Проверяем, не в черном ли списке звонящий
+            var isSpam = false;
+            for (var i = 0; i < spamList.length; i++) {
+                if (spamList[i] === fromUsername) isSpam = true;
+            }
+            if (isSpam) {
+                // Автоматически отклоняем звонок от спамера
+                ws.send(JSON.stringify({ type: 'call_reject', to: fromUsername }));
+                return;
+            }
             
-            var userItems = document.querySelectorAll('.user-item');
-            for (var i = 0; i < userItems.length; i++) {
-                var item = userItems[i];
-                var nameElem = item.querySelector('.user-name');
-                if (nameElem && nameElem.textContent.startsWith(fromUsername)) {
-                    var oldCallBtn = item.querySelector('.call-btn');
-                    if (oldCallBtn) oldCallBtn.remove();
-                    var oldRejectBtn = item.querySelector('.reject-btn');
-                    if (oldRejectBtn) oldRejectBtn.remove();
-                    
-                    var answerBtn = document.createElement('button');
-                    answerBtn.textContent = '✅ Ответить';
-                    answerBtn.className = 'call-btn';
-                    answerBtn.style.background = '#238636';
-                    answerBtn.onclick = (function(u, o) { return function(e) {
-                        e.stopPropagation();
-                        answerCall(u, o);
-                    }; })(fromUsername, offer);
-                    item.appendChild(answerBtn);
-                    
-                    var rejectBtn = document.createElement('button');
-                    rejectBtn.textContent = '❌ Отклонить';
-                    rejectBtn.className = 'reject-btn';
-                    rejectBtn.onclick = (function(u) { return function(e) {
-                        e.stopPropagation();
-                        rejectCall(u);
-                    }; })(fromUsername);
-                    item.appendChild(rejectBtn);
-                    break;
-                }
+            pendingCalls.set(fromUsername, offer);
+            showSystemMessage('📞 ' + fromUsername + ' звонит вам! Открываем чат...');
+            
+            // Автоматически открываем чат со звонящим
+            if (!privateChats.has(fromUsername)) {
+                privateChats.set(fromUsername, []);
+                addPrivateChatTab(fromUsername);
+            }
+            window.switchChat(fromUsername);
+            
+            // Показываем кнопки ответа/отклонения в чате
+            var callBtn = document.getElementById('chatCallBtn');
+            if (callBtn) {
+                callBtn.textContent = '✅ Ответить';
+                callBtn.style.background = '#238636';
+                callBtn.onclick = function() {
+                    answerCall(fromUsername, offer);
+                };
+                
+                // Добавляем кнопку отклонения
+                var rejectBtn = document.createElement('button');
+                rejectBtn.id = 'chatRejectBtn';
+                rejectBtn.textContent = '❌ Отклонить';
+                rejectBtn.className = 'chat-call-btn';
+                rejectBtn.style.background = '#da3633';
+                rejectBtn.style.marginLeft = '5px';
+                rejectBtn.onclick = function() {
+                    rejectCall(fromUsername);
+                    rejectBtn.remove();
+                    var btn = document.getElementById('chatCallBtn');
+                    if (btn) {
+                        btn.textContent = '📞 Позвонить';
+                        btn.style.background = '#238636';
+                        btn.onclick = function() { window.startCall(fromUsername); };
+                    }
+                };
+                callBtn.parentNode.appendChild(rejectBtn);
             }
         }
         
         async function answerCall(fromUsername, offer) {
-            var userItems = document.querySelectorAll('.user-item');
-            for (var i = 0; i < userItems.length; i++) {
-                var item = userItems[i];
-                var nameElem = item.querySelector('.user-name');
-                if (nameElem && nameElem.textContent.startsWith(fromUsername)) {
-                    var btn = item.querySelector('.call-btn');
-                    if (btn) btn.remove();
-                    var rbtn = item.querySelector('.reject-btn');
-                    if (rbtn) rbtn.remove();
-                    break;
-                }
-            }
+            // Убираем кнопку отклонения
+            var rejectBtn = document.getElementById('chatRejectBtn');
+            if (rejectBtn) rejectBtn.remove();
             
             try {
                 showSystemMessage('📞 Отвечаем ' + fromUsername + '...');
@@ -1047,6 +1086,16 @@ HTML_PAGE = r'''<!DOCTYPE html>
             }
             if (pendingCalls.has(targetUsername)) {
                 showSystemMessage('Пользователь уже звонит вам');
+                return;
+            }
+            
+            // Проверяем черный список
+            var isSpam = false;
+            for (var i = 0; i < spamList.length; i++) {
+                if (spamList[i] === targetUsername) isSpam = true;
+            }
+            if (isSpam) {
+                showSystemMessage('⚠️ Нельзя звонить пользователю из черного списка');
                 return;
             }
             
@@ -1159,21 +1208,18 @@ HTML_PAGE = r'''<!DOCTYPE html>
                 html += '<div class="user-avatar ' + (isSpam ? 'spam' : '') + '"></div>';
                 html += '<div class="user-name">' + escapeHtml(user.name) + (isCurrent ? ' (Вы)' : '') + sessionsHtml + statsHtml + '</div>';
                 
-                if (!isCurrent) {
-                    html += '<button class="call-btn" onclick="event.stopPropagation(); startCall(\'' + escapeHtml(user.name) + '\')">📞 Звонок</button>';
+                if (!isCurrent && !isSpam) {
+                    // Кнопка звонка убрана из списка пользователей - звонить можно только из чата
                     var badgeText = isSpam ? 'Снять спам' : 'Спам';
                     var badgeClass = isSpam ? 'spam-badge' : 'private-badge';
                     html += '<span class="' + badgeClass + '" onclick="event.stopPropagation(); toggleSpam(\'' + escapeHtml(user.name) + '\')">' + badgeText + '</span>';
+                } else if (!isCurrent && isSpam) {
+                    var badgeText = 'Снять спам';
+                    html += '<span class="spam-badge" onclick="event.stopPropagation(); toggleSpam(\'' + escapeHtml(user.name) + '\')">' + badgeText + '</span>';
                 }
                 html += '</div>';
             }
             usersList.innerHTML = html;
-            
-            for (var [username, call] of activeCalls) {
-                if (call && call.pc) {
-                    updateCallButton(username, true);
-                }
-            }
         }
         
         window.toggleSpam = function(username) {
@@ -1188,6 +1234,10 @@ HTML_PAGE = r'''<!DOCTYPE html>
                 spamList = newList;
                 showSystemMessage(username + ' удален из черного списка');
             } else {
+                // При добавлении в спам завершаем активный звонок если есть
+                if (activeCalls.has(username)) {
+                    window.endCall(username);
+                }
                 if (ws && ws.readyState === WebSocket.OPEN) {
                     ws.send(JSON.stringify({ type: 'mark_spam', spammer: username }));
                 }
