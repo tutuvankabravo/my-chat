@@ -302,7 +302,7 @@ class ChatServer:
 
 chat_processor = ChatServer()
 
-# --- Встроенный HTML (исправленная версия) ---
+# --- Встроенный HTML (полностью исправленная версия) ---
 HTML_PAGE = '''<!DOCTYPE html>
 <html lang="ru">
 <head>
@@ -814,23 +814,28 @@ HTML_PAGE = '''<!DOCTYPE html>
             usersList.innerHTML = filteredUsers.map(user => {
                 let sessionsHtml = '';
                 if (user.sessions > 1) {
-                    sessionsHtml = `<span class="user-sessions">📱 ${user.sessions} вкладки</span>`;
+                    sessionsHtml = '<span class="user-sessions">📱 ' + user.sessions + ' вкладки</span>';
                 }
                 const isCurrent = user.name === currentUser;
                 const isSpamUserFlag = isSpamUser(user.name);
                 const spamCount = spamStats[user.name] || 0;
-                const spamStatsHtml = spamCount > 0 ? `<span class="spam-stats">⚠️ ${spamCount}</span>` : '';
+                const spamStatsHtml = spamCount > 0 ? '<span class="spam-stats">⚠️ ' + spamCount + '</span>' : '';
                 
-                const onClick = isCurrent ? '' : `onclick="startPrivateChat('${escapeHtml(user.name)}')"`;
-                const onSpamToggle = !isCurrent ? `onclick="event.stopPropagation(); toggleSpam('${escapeHtml(user.name)}')"` : '';
+                const onClick = isCurrent ? '' : 'onclick="startPrivateChat(\'' + escapeHtml(user.name) + '\')"';
+                const onSpamToggle = !isCurrent ? 'onclick="event.stopPropagation(); toggleSpam(\'' + escapeHtml(user.name) + '\')"' : '';
                 
-                return `<div class="user-item ${isSpamUserFlag ? 'spam' : ''}" ${onClick}>
-                    <div class="user-avatar ${isSpamUserFlag ? 'spam' : ''}"></div>
-                    <div class="user-name">${escapeHtml(user.name)} ${isCurrent ? '(Вы)' : ''}${sessionsHtml}</div>
-                    ${spamStatsHtml}
-                    ${!isCurrent ? `<span class="${isSpamUserFlag ? 'spam-badge' : 'private-badge'}" ${onSpamToggle}>${isSpamUserFlag ? '🚫 Снять спам' : '⚠️ Спам'}</span>` : ''}
-                    ${!isCurrent && !isSpamUserFlag ? '<span class="private-badge" onclick="event.stopPropagation(); startPrivateChat(\'' + escapeHtml(user.name) + '\')">💬</span>' : ''}
-                </div>`;
+                let result = '<div class="user-item ' + (isSpamUserFlag ? 'spam' : '') + '" ' + onClick + '>';
+                result += '<div class="user-avatar ' + (isSpamUserFlag ? 'spam' : '') + '"></div>';
+                result += '<div class="user-name">' + escapeHtml(user.name) + (isCurrent ? ' (Вы)' : '') + sessionsHtml + '</div>';
+                result += spamStatsHtml;
+                if (!isCurrent) {
+                    result += '<span class="' + (isSpamUserFlag ? 'spam-badge' : 'private-badge') + '" ' + onSpamToggle + '>' + (isSpamUserFlag ? '🚫 Снять спам' : '⚠️ Спам') + '</span>';
+                }
+                if (!isCurrent && !isSpamUserFlag) {
+                    result += '<span class="private-badge" onclick="event.stopPropagation(); startPrivateChat(\'' + escapeHtml(user.name) + '\')">💬</span>';
+                }
+                result += '</div>';
+                return result;
             }).join('');
         }
         
@@ -870,7 +875,7 @@ HTML_PAGE = '''<!DOCTYPE html>
         
         function connect(username, sessionId) {
             const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-            const wsUrl = `${wsProtocol}//${window.location.host}/ws`;
+            const wsUrl = wsProtocol + '//' + window.location.host + '/ws';
             ws = new WebSocket(wsUrl);
             
             ws.onopen = () => {
@@ -954,8 +959,8 @@ HTML_PAGE = '''<!DOCTYPE html>
             const tab = document.createElement('button');
             tab.className = 'chat-tab private';
             tab.setAttribute('data-chat', username);
-            tab.innerHTML = `💬 ${username} <span class="close-tab" onclick="event.stopPropagation(); window.closePrivateChat('${username}')">✖</span>`;
-            tab.onclick = () => window.switchChat(username);
+            tab.innerHTML = '💬 ' + username + ' <span class="close-tab" onclick="event.stopPropagation(); window.closePrivateChat(\'' + username + '\')">✖</span>';
+            tab.onclick = function() { window.switchChat(username); };
             tabsContainer.appendChild(tab);
         }
         
@@ -1006,19 +1011,19 @@ HTML_PAGE = '''<!DOCTYPE html>
         function addPrivateMessageToChat(message, otherUser) {
             const messageDiv = document.createElement('div');
             const isFromMe = message.from === currentUser;
-            messageDiv.className = `message ${isFromMe ? 'own' : ''} private`;
+            messageDiv.className = 'message ' + (isFromMe ? 'own' : '') + ' private';
             const sender = isFromMe ? 'Вы' : message.from;
             const textWithBreaks = escapeHtml(message.text).replace(/\\\\n/g, '<br>');
-            messageDiv.innerHTML = `<div class="message-bubble"><div class="message-username">${escapeHtml(sender)}</div><div class="message-text">${textWithBreaks}</div><div class="message-time">${formatTime(message.timestamp)}</div></div>`;
+            messageDiv.innerHTML = '<div class="message-bubble"><div class="message-username">' + escapeHtml(sender) + '</div><div class="message-text">' + textWithBreaks + '</div><div class="message-time">' + formatTime(message.timestamp) + '</div></div>';
             messagesContainer.appendChild(messageDiv);
             scrollToBottom();
         }
         
         function addMessageToChat(message) {
             const messageDiv = document.createElement('div');
-            messageDiv.className = `message ${message.username === currentUser ? 'own' : ''}`;
+            messageDiv.className = 'message ' + (message.username === currentUser ? 'own' : '');
             const textWithBreaks = escapeHtml(message.text).replace(/\\\\n/g, '<br>');
-            messageDiv.innerHTML = `<div class="message-bubble"><div class="message-username">${escapeHtml(message.username)}</div><div class="message-text">${textWithBreaks}</div><div class="message-time">${formatTime(message.timestamp)}</div></div>`;
+            messageDiv.innerHTML = '<div class="message-bubble"><div class="message-username">' + escapeHtml(message.username) + '</div><div class="message-text">' + textWithBreaks + '</div><div class="message-time">' + formatTime(message.timestamp) + '</div></div>';
             messagesContainer.appendChild(messageDiv);
             scrollToBottom();
         }
@@ -1027,7 +1032,7 @@ HTML_PAGE = '''<!DOCTYPE html>
             if (currentChat !== 'main') return;
             const messageDiv = document.createElement('div'); 
             messageDiv.className = 'message system'; 
-            messageDiv.innerHTML = `<div class="message-bubble">${escapeHtml(text)}</div>`; 
+            messageDiv.innerHTML = '<div class="message-bubble">' + escapeHtml(text) + '</div>'; 
             messagesContainer.appendChild(messageDiv); 
             scrollToBottom(); 
         }
@@ -1211,9 +1216,12 @@ HTML_PAGE = '''<!DOCTYPE html>
         });
         
         // Обработчик для вкладки общего чата
-        document.querySelector('.chat-tab[data-chat="main"]').addEventListener('click', function() {
-            window.switchChat('main');
-        });
+        const mainTab = document.querySelector('.chat-tab[data-chat="main"]');
+        if (mainTab) {
+            mainTab.addEventListener('click', function() {
+                window.switchChat('main');
+            });
+        }
         
         messageInput.focus();
         
