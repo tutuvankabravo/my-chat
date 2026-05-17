@@ -723,7 +723,7 @@ HTML_PAGE = r'''<!DOCTYPE html>
         function addMessageToChat(message) {
             var div = document.createElement('div');
             div.className = 'message ' + (message.username === currentUser ? 'own' : '');
-            var textWithBreaks = escapeHtml(message.text).split('\\n').join('<br>');
+            var textWithBreaks = escapeHtml(message.text).split(/\n/).join('<br>');
             div.innerHTML = '<div class="message-bubble"><div class="message-username">' + escapeHtml(message.username) + '</div><div class="message-text">' + textWithBreaks + '</div><div class="message-time">' + formatTime(message.timestamp) + '</div></div>';
             messagesContainer.appendChild(div);
             scrollToBottom();
@@ -734,7 +734,7 @@ HTML_PAGE = r'''<!DOCTYPE html>
             var isFromMe = (message.from === currentUser);
             div.className = 'message ' + (isFromMe ? 'own' : '');
             var sender = isFromMe ? 'Вы' : message.from;
-            var textWithBreaks = escapeHtml(message.text).split('\\n').join('<br>');
+            var textWithBreaks = escapeHtml(message.text).split(/\n/).join('<br>');
             div.innerHTML = '<div class="message-bubble"><div class="message-username">' + escapeHtml(sender) + '</div><div class="message-text">' + textWithBreaks + '</div><div class="message-time">' + formatTime(message.timestamp) + '</div></div>';
             messagesContainer.appendChild(div);
             scrollToBottom();
