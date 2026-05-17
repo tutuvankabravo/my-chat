@@ -302,7 +302,7 @@ class ChatServer:
 
 chat_processor = ChatServer()
 
-# --- Встроенный HTML (полностью исправленная версия) ---
+# --- Встроенный HTML (исправленная версия без проблем с экранированием) ---
 HTML_PAGE = '''<!DOCTYPE html>
 <html lang="ru">
 <head>
@@ -726,7 +726,6 @@ HTML_PAGE = '''<!DOCTYPE html>
         </div>
     </div>
     <script>
-        // Глобальные переменные
         let ws = null;
         let currentUser = null;
         let sessionId = null;
@@ -741,7 +740,6 @@ HTML_PAGE = '''<!DOCTYPE html>
         let spamStats = {};
         let spamList = [];
         
-        // DOM элементы
         const messagesContainer = document.getElementById('messagesContainer');
         const messageInput = document.getElementById('messageInput');
         const typingIndicator = document.getElementById('typingIndicator');
@@ -756,10 +754,8 @@ HTML_PAGE = '''<!DOCTYPE html>
         const toggleUsersBtn = document.getElementById('toggleUsersBtn');
         const userSearch = document.getElementById('userSearch');
         
-        // История сообщений
         window.messagesHistory = [];
         
-        // Функции
         function getSessionId() {
             let id = localStorage.getItem('chat_session_id');
             if (!id) {
@@ -789,77 +785,71 @@ HTML_PAGE = '''<!DOCTYPE html>
         
         function filterUsers() {
             searchQuery = userSearch.value.toLowerCase();
-            
             let filteredUsers = [...allUsers];
-            
             if (searchQuery) {
-                filteredUsers = filteredUsers.filter(user => 
-                    user.name.toLowerCase().includes(searchQuery)
-                );
+                filteredUsers = filteredUsers.filter(function(user) {
+                    return user.name.toLowerCase().includes(searchQuery);
+                });
             }
-            
             if (currentUserFilter === 'spam') {
-                filteredUsers = filteredUsers.filter(user => isSpamUser(user.name));
+                filteredUsers = filteredUsers.filter(function(user) {
+                    return isSpamUser(user.name);
+                });
             } else if (currentUserFilter === 'clean') {
-                filteredUsers = filteredUsers.filter(user => !isSpamUser(user.name));
+                filteredUsers = filteredUsers.filter(function(user) {
+                    return !isSpamUser(user.name);
+                });
             }
-            
-            filteredUsers.sort((a, b) => a.name.localeCompare(b.name));
-            
+            filteredUsers.sort(function(a, b) {
+                return a.name.localeCompare(b.name);
+            });
             if (filteredUsers.length === 0) {
                 usersList.innerHTML = '<div style="padding: 10px; text-align: center; color: var(--text-secondary);">👤 Пользователи не найдены</div>';
                 return;
             }
-            
-            usersList.innerHTML = filteredUsers.map(user => {
-                let sessionsHtml = '';
+            var html = '';
+            for (var i = 0; i < filteredUsers.length; i++) {
+                var user = filteredUsers[i];
+                var sessionsHtml = '';
                 if (user.sessions > 1) {
                     sessionsHtml = '<span class="user-sessions">📱 ' + user.sessions + ' вкладки</span>';
                 }
-                const isCurrent = user.name === currentUser;
-                const isSpamUserFlag = isSpamUser(user.name);
-                const spamCount = spamStats[user.name] || 0;
-                const spamStatsHtml = spamCount > 0 ? '<span class="spam-stats">⚠️ ' + spamCount + '</span>' : '';
-                
-                const onClick = isCurrent ? '' : 'onclick="startPrivateChat(\'' + escapeHtml(user.name) + '\')"';
-                const onSpamToggle = !isCurrent ? 'onclick="event.stopPropagation(); toggleSpam(\'' + escapeHtml(user.name) + '\')"' : '';
-                
-                let result = '<div class="user-item ' + (isSpamUserFlag ? 'spam' : '') + '" ' + onClick + '>';
-                result += '<div class="user-avatar ' + (isSpamUserFlag ? 'spam' : '') + '"></div>';
-                result += '<div class="user-name">' + escapeHtml(user.name) + (isCurrent ? ' (Вы)' : '') + sessionsHtml + '</div>';
-                result += spamStatsHtml;
+                var isCurrent = (user.name === currentUser);
+                var isSpamUserFlag = isSpamUser(user.name);
+                var spamCount = spamStats[user.name] || 0;
+                var spamStatsHtml = spamCount > 0 ? '<span class="spam-stats">⚠️ ' + spamCount + '</span>' : '';
+                var onClick = isCurrent ? '' : ' onclick="startPrivateChat(\'' + escapeHtml(user.name) + '\')"';
+                var onSpamToggle = !isCurrent ? ' onclick="event.stopPropagation(); toggleSpam(\'' + escapeHtml(user.name) + '\')"' : '';
+                html += '<div class="user-item ' + (isSpamUserFlag ? 'spam' : '') + '"' + onClick + '>';
+                html += '<div class="user-avatar ' + (isSpamUserFlag ? 'spam' : '') + '"></div>';
+                html += '<div class="user-name">' + escapeHtml(user.name) + (isCurrent ? ' (Вы)' : '') + sessionsHtml + '</div>';
+                html += spamStatsHtml;
                 if (!isCurrent) {
-                    result += '<span class="' + (isSpamUserFlag ? 'spam-badge' : 'private-badge') + '" ' + onSpamToggle + '>' + (isSpamUserFlag ? '🚫 Снять спам' : '⚠️ Спам') + '</span>';
+                    html += '<span class="' + (isSpamUserFlag ? 'spam-badge' : 'private-badge') + '"' + onSpamToggle + '>' + (isSpamUserFlag ? '🚫 Снять спам' : '⚠️ Спам') + '</span>';
                 }
                 if (!isCurrent && !isSpamUserFlag) {
-                    result += '<span class="private-badge" onclick="event.stopPropagation(); startPrivateChat(\'' + escapeHtml(user.name) + '\')">💬</span>';
+                    html += '<span class="private-badge" onclick="event.stopPropagation(); startPrivateChat(\'' + escapeHtml(user.name) + '\')">💬</span>';
                 }
-                result += '</div>';
-                return result;
-            }).join('');
+                html += '</div>';
+            }
+            usersList.innerHTML = html;
         }
         
         function isSpamUser(username) {
-            return spamList.includes(username);
+            return spamList.indexOf(username) !== -1;
         }
         
         window.toggleSpam = function(username) {
             if (isSpamUser(username)) {
                 if (ws && ws.readyState === WebSocket.OPEN) {
-                    ws.send(JSON.stringify({ 
-                        type: 'unmark_spam', 
-                        spammer: username 
-                    }));
+                    ws.send(JSON.stringify({ type: 'unmark_spam', spammer: username }));
                 }
-                const index = spamList.indexOf(username);
+                var index = spamList.indexOf(username);
                 if (index > -1) spamList.splice(index, 1);
                 showSystemMessage('✅ ' + username + ' удален из черного списка');
             } else {
                 if (ws && ws.readyState === WebSocket.OPEN) {
-                    ws.send(JSON.stringify({ 
-                        type: 'mark_spam', 
-                        spammer: username 
-                    }));
+                    ws.send(JSON.stringify({ type: 'mark_spam', spammer: username }));
                 }
                 spamList.push(username);
                 showSystemMessage('⚠️ ' + username + ' отмечен как спам. Сообщения от него не будут приходить.');
@@ -874,48 +864,47 @@ HTML_PAGE = '''<!DOCTYPE html>
         }
         
         function connect(username, sessionId) {
-            const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-            const wsUrl = wsProtocol + '//' + window.location.host + '/ws';
+            var wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            var wsUrl = wsProtocol + '//' + window.location.host + '/ws';
             ws = new WebSocket(wsUrl);
-            
-            ws.onopen = () => {
+            ws.onopen = function() {
                 console.log('Connected');
                 ws.send(JSON.stringify({ username: username, session_id: sessionId }));
-                setInterval(() => {
+                setInterval(function() {
                     if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'ping' }));
                 }, 30000);
-                setTimeout(() => updateSpamList(), 1000);
+                setTimeout(function() { updateSpamList(); }, 1000);
             };
-            ws.onmessage = (event) => { 
-                const data = JSON.parse(event.data); 
-                handleMessage(data); 
+            ws.onmessage = function(event) {
+                var data = JSON.parse(event.data);
+                handleMessage(data);
             };
-            ws.onerror = (error) => console.error('WebSocket error:', error);
-            ws.onclose = () => { 
-                console.log('Disconnected'); 
-                showSystemMessage('Соединение потеряно. Переподключение...'); 
-                setTimeout(() => { if (currentUser) connect(currentUser, sessionId); }, 3000); 
+            ws.onerror = function(error) { console.error('WebSocket error:', error); };
+            ws.onclose = function() {
+                console.log('Disconnected');
+                showSystemMessage('Соединение потеряно. Переподключение...');
+                setTimeout(function() { if (currentUser) connect(currentUser, sessionId); }, 3000);
             };
         }
         
         function handleMessage(data) {
             switch(data.type) {
-                case 'message': 
+                case 'message':
                     if (currentChat === 'main') addMessageToChat(data);
                     break;
                 case 'private_message':
                     handlePrivateMessage(data);
                     break;
-                case 'system': 
-                    showSystemMessage(data.message); 
-                    if (data.users_count) updateOnlineCount(data.users_count); 
+                case 'system':
+                    showSystemMessage(data.message);
+                    if (data.users_count) updateOnlineCount(data.users_count);
                     break;
-                case 'users_list': 
+                case 'users_list':
                     allUsers = data.users;
-                    updateUsersList(data.users, data.count); 
+                    updateUsersList(data.users, data.count);
                     break;
-                case 'typing': 
-                    updateTypingIndicator(data.username, data.is_typing); 
+                case 'typing':
+                    updateTypingIndicator(data.username, data.is_typing);
                     break;
                 case 'spam_list':
                     spamList = data.spammers || [];
@@ -929,19 +918,16 @@ HTML_PAGE = '''<!DOCTYPE html>
         }
         
         function handlePrivateMessage(message) {
-            const isFromMe = message.from === currentUser;
-            const otherUser = isFromMe ? message.to : message.from;
-            
-            if (!isFromMe && spamList.includes(message.from)) {
+            var isFromMe = (message.from === currentUser);
+            var otherUser = isFromMe ? message.to : message.from;
+            if (!isFromMe && spamList.indexOf(message.from) !== -1) {
                 return;
             }
-            
             if (!privateChats.has(otherUser)) {
                 privateChats.set(otherUser, []);
                 addPrivateChatTab(otherUser);
             }
             privateChats.get(otherUser).push(message);
-            
             if (currentChat === otherUser) {
                 addPrivateMessageToChat(message, otherUser);
             } else if (!isFromMe) {
@@ -950,13 +936,12 @@ HTML_PAGE = '''<!DOCTYPE html>
         }
         
         function addPrivateChatTab(username) {
-            const tabsContainer = document.getElementById('chatTabs');
-            const existingTab = Array.from(tabsContainer.children).find(
-                tab => tab.textContent.includes(username)
-            );
+            var tabsContainer = document.getElementById('chatTabs');
+            var existingTab = Array.from(tabsContainer.children).find(function(tab) {
+                return tab.textContent.includes(username);
+            });
             if (existingTab) return;
-            
-            const tab = document.createElement('button');
+            var tab = document.createElement('button');
             tab.className = 'chat-tab private';
             tab.setAttribute('data-chat', username);
             tab.innerHTML = '💬 ' + username + ' <span class="close-tab" onclick="event.stopPropagation(); window.closePrivateChat(\'' + username + '\')">✖</span>';
@@ -966,12 +951,11 @@ HTML_PAGE = '''<!DOCTYPE html>
         
         window.closePrivateChat = function(username) {
             privateChats.delete(username);
-            const tabsContainer = document.getElementById('chatTabs');
-            const tab = Array.from(tabsContainer.children).find(
-                t => t.getAttribute('data-chat') === username
-            );
+            var tabsContainer = document.getElementById('chatTabs');
+            var tab = Array.from(tabsContainer.children).find(function(t) {
+                return t.getAttribute('data-chat') === username;
+            });
             if (tab) tab.remove();
-            
             if (currentChat === username) {
                 window.switchChat('main');
             }
@@ -979,29 +963,25 @@ HTML_PAGE = '''<!DOCTYPE html>
         
         window.switchChat = function(chatId) {
             currentChat = chatId;
-            
-            const tabs = document.querySelectorAll('.chat-tab');
-            tabs.forEach(tab => {
-                const tabChat = tab.getAttribute('data-chat');
-                if ((chatId === 'main' && tabChat === 'main') ||
-                    (chatId !== 'main' && tabChat === chatId)) {
+            var tabs = document.querySelectorAll('.chat-tab');
+            tabs.forEach(function(tab) {
+                var tabChat = tab.getAttribute('data-chat');
+                if ((chatId === 'main' && tabChat === 'main') || (chatId !== 'main' && tabChat === chatId)) {
                     tab.classList.add('active');
                 } else {
                     tab.classList.remove('active');
                 }
             });
-            
             messagesContainer.innerHTML = '';
-            
             if (chatId === 'main') {
-                window.messagesHistory.forEach(msg => {
+                window.messagesHistory.forEach(function(msg) {
                     if (msg.type === 'message') {
                         addMessageToChat(msg);
                     }
                 });
             } else {
-                const messages = privateChats.get(chatId) || [];
-                messages.forEach(msg => {
+                var messages = privateChats.get(chatId) || [];
+                messages.forEach(function(msg) {
                     addPrivateMessageToChat(msg, chatId);
                 });
             }
@@ -1009,42 +989,42 @@ HTML_PAGE = '''<!DOCTYPE html>
         };
         
         function addPrivateMessageToChat(message, otherUser) {
-            const messageDiv = document.createElement('div');
-            const isFromMe = message.from === currentUser;
+            var messageDiv = document.createElement('div');
+            var isFromMe = (message.from === currentUser);
             messageDiv.className = 'message ' + (isFromMe ? 'own' : '') + ' private';
-            const sender = isFromMe ? 'Вы' : message.from;
-            const textWithBreaks = escapeHtml(message.text).replace(/\\\\n/g, '<br>');
+            var sender = isFromMe ? 'Вы' : message.from;
+            var textWithBreaks = escapeHtml(message.text).replace(/\\n/g, '<br>');
             messageDiv.innerHTML = '<div class="message-bubble"><div class="message-username">' + escapeHtml(sender) + '</div><div class="message-text">' + textWithBreaks + '</div><div class="message-time">' + formatTime(message.timestamp) + '</div></div>';
             messagesContainer.appendChild(messageDiv);
             scrollToBottom();
         }
         
         function addMessageToChat(message) {
-            const messageDiv = document.createElement('div');
+            var messageDiv = document.createElement('div');
             messageDiv.className = 'message ' + (message.username === currentUser ? 'own' : '');
-            const textWithBreaks = escapeHtml(message.text).replace(/\\\\n/g, '<br>');
+            var textWithBreaks = escapeHtml(message.text).replace(/\\n/g, '<br>');
             messageDiv.innerHTML = '<div class="message-bubble"><div class="message-username">' + escapeHtml(message.username) + '</div><div class="message-text">' + textWithBreaks + '</div><div class="message-time">' + formatTime(message.timestamp) + '</div></div>';
             messagesContainer.appendChild(messageDiv);
             scrollToBottom();
         }
         
-        function showSystemMessage(text) { 
+        function showSystemMessage(text) {
             if (currentChat !== 'main') return;
-            const messageDiv = document.createElement('div'); 
-            messageDiv.className = 'message system'; 
-            messageDiv.innerHTML = '<div class="message-bubble">' + escapeHtml(text) + '</div>'; 
-            messagesContainer.appendChild(messageDiv); 
-            scrollToBottom(); 
+            var messageDiv = document.createElement('div');
+            messageDiv.className = 'message system';
+            messageDiv.innerHTML = '<div class="message-bubble">' + escapeHtml(text) + '</div>';
+            messagesContainer.appendChild(messageDiv);
+            scrollToBottom();
         }
         
         function showNotification(username) {
-            const tabsContainer = document.getElementById('chatTabs');
-            const tab = Array.from(tabsContainer.children).find(
-                t => t.getAttribute('data-chat') === username
-            );
+            var tabsContainer = document.getElementById('chatTabs');
+            var tab = Array.from(tabsContainer.children).find(function(t) {
+                return t.getAttribute('data-chat') === username;
+            });
             if (tab && currentChat !== username) {
                 tab.style.background = '#ff9800';
-                setTimeout(() => {
+                setTimeout(function() {
                     if (currentChat !== username) {
                         tab.style.background = '';
                     }
@@ -1052,27 +1032,21 @@ HTML_PAGE = '''<!DOCTYPE html>
             }
         }
         
-        window.sendMessage = function() { 
-            const text = messageInput.value;
+        window.sendMessage = function() {
+            var text = messageInput.value;
             if (!text.trim() || !ws || ws.readyState !== WebSocket.OPEN) return;
-            
             if (currentChat === 'main') {
                 ws.send(JSON.stringify({ type: 'message', text: text }));
             } else {
-                ws.send(JSON.stringify({ 
-                    type: 'private_message', 
-                    to: currentChat, 
-                    text: text 
-                }));
+                ws.send(JSON.stringify({ type: 'private_message', to: currentChat, text: text }));
             }
-            
-            messageInput.value = ''; 
+            messageInput.value = '';
             messageInput.style.height = 'auto';
             updateCharCounter();
-            if (isTyping) { 
-                ws.send(JSON.stringify({ type: 'typing', is_typing: false })); 
-                isTyping = false; 
-            } 
+            if (isTyping) {
+                ws.send(JSON.stringify({ type: 'typing', is_typing: false }));
+                isTyping = false;
+            }
         };
         
         window.startPrivateChat = function(username) {
@@ -1096,7 +1070,7 @@ HTML_PAGE = '''<!DOCTYPE html>
         }
         
         function updateCharCounter() {
-            const length = messageInput.value.length;
+            var length = messageInput.value.length;
             charCounter.textContent = length + '/1600';
             if (length > 1400) {
                 charCounter.className = 'char-counter warning';
@@ -1109,85 +1083,86 @@ HTML_PAGE = '''<!DOCTYPE html>
         
         function handleKeyUp(event) {
             updateCharCounter();
-            if (!isTyping && messageInput.value.length > 0 && ws && ws.readyState === WebSocket.OPEN) { 
-                isTyping = true; 
-                ws.send(JSON.stringify({ type: 'typing', is_typing: true })); 
-            } 
-            clearTimeout(typingTimeout); 
-            typingTimeout = setTimeout(() => { 
-                if (isTyping && ws && ws.readyState === WebSocket.OPEN) { 
-                    isTyping = false; 
-                    ws.send(JSON.stringify({ type: 'typing', is_typing: false })); 
-                } 
+            if (!isTyping && messageInput.value.length > 0 && ws && ws.readyState === WebSocket.OPEN) {
+                isTyping = true;
+                ws.send(JSON.stringify({ type: 'typing', is_typing: true }));
+            }
+            clearTimeout(typingTimeout);
+            typingTimeout = setTimeout(function() {
+                if (isTyping && ws && ws.readyState === WebSocket.OPEN) {
+                    isTyping = false;
+                    ws.send(JSON.stringify({ type: 'typing', is_typing: false }));
+                }
             }, 1000);
         }
         
-        function updateUsersList(users, count) { 
-            usersCountSpan.textContent = count; 
-            onlineCountSpan.textContent = count + ' онлайн'; 
+        function updateUsersList(users, count) {
+            usersCountSpan.textContent = count;
+            onlineCountSpan.textContent = count + ' онлайн';
             filterUsers();
         }
         
-        function updateOnlineCount(count) { 
-            onlineCountSpan.textContent = count + ' онлайн'; 
-            usersCountSpan.textContent = count; 
+        function updateOnlineCount(count) {
+            onlineCountSpan.textContent = count + ' онлайн';
+            usersCountSpan.textContent = count;
         }
         
-        function updateTypingIndicator(username, isTypingUser) { 
+        function updateTypingIndicator(username, isTypingUser) {
             if (currentChat !== 'main') return;
-            if (isTypingUser && username !== currentUser) typingUsers.add(username); 
-            else typingUsers.delete(username); 
-            if (typingUsers.size > 0) { 
-                const names = Array.from(typingUsers); 
-                let text = names.length === 1 ? names[0] + ' печатает...' : names.length === 2 ? names[0] + ' и ' + names[1] + ' печатают...' : names.length + ' человек печатают...'; 
-                typingIndicator.textContent = text; 
-            } else typingIndicator.textContent = ''; 
+            if (isTypingUser && username !== currentUser) typingUsers.add(username);
+            else typingUsers.delete(username);
+            if (typingUsers.size > 0) {
+                var names = Array.from(typingUsers);
+                var text = '';
+                if (names.length === 1) text = names[0] + ' печатает...';
+                else if (names.length === 2) text = names[0] + ' и ' + names[1] + ' печатают...';
+                else text = names.length + ' человек печатают...';
+                typingIndicator.textContent = text;
+            } else typingIndicator.textContent = '';
         }
         
-        window.changeUsername = function() { 
-            const newName = prompt('Введите новое имя (макс. 20 символов):', currentUser); 
-            if (newName && newName.trim() && newName.trim() !== currentUser) { 
-                currentUser = newName.trim().substring(0, 20); 
-                currentUsernameSpan.textContent = currentUser; 
+        window.changeUsername = function() {
+            var newName = prompt('Введите новое имя (макс. 20 символов):', currentUser);
+            if (newName && newName.trim() && newName.trim() !== currentUser) {
+                currentUser = newName.trim().substring(0, 20);
+                currentUsernameSpan.textContent = currentUser;
                 localStorage.setItem('chat_username', currentUser);
-                if (ws) ws.close(); 
-                setTimeout(() => connect(currentUser, sessionId), 100); 
-            } 
+                if (ws) ws.close();
+                setTimeout(function() { connect(currentUser, sessionId); }, 100);
+            }
         };
         
-        function escapeHtml(text) { 
-            const div = document.createElement('div'); 
-            div.textContent = text; 
-            return div.innerHTML; 
+        function escapeHtml(text) {
+            var div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
         }
         
-        function formatTime(timestamp) { 
-            if (!timestamp) return ''; 
-            return new Date(timestamp).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' }); 
+        function formatTime(timestamp) {
+            if (!timestamp) return '';
+            return new Date(timestamp).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
         }
         
-        function scrollToBottom() { 
-            messagesContainer.scrollTop = messagesContainer.scrollHeight; 
+        function scrollToBottom() {
+            messagesContainer.scrollTop = messagesContainer.scrollHeight;
         }
         
         function autoResizeTextarea() {
             this.style.height = 'auto';
-            const newHeight = Math.min(this.scrollHeight, 120);
+            var newHeight = Math.min(this.scrollHeight, 120);
             this.style.height = newHeight + 'px';
         }
         
-        // Инициализация
         sessionId = getSessionId();
-        const saved = localStorage.getItem('chat_username');
+        var saved = localStorage.getItem('chat_username');
         if (saved) currentUser = saved;
-        else { 
-            currentUser = prompt('Ваше имя:', 'Гость') || 'Гость_' + Math.floor(Math.random() * 1000); 
-            localStorage.setItem('chat_username', currentUser); 
+        else {
+            currentUser = prompt('Ваше имя:', 'Гость') || 'Гость_' + Math.floor(Math.random() * 1000);
+            localStorage.setItem('chat_username', currentUser);
         }
         currentUsernameSpan.textContent = currentUser;
         
-        // Сохраняем историю сообщений
-        const originalAddMessage = addMessageToChat;
+        var originalAddMessage = addMessageToChat;
         window.addMessageToChat = function(message) {
             window.messagesHistory.push(message);
             if (window.messagesHistory.length > 100) window.messagesHistory.shift();
@@ -1196,7 +1171,6 @@ HTML_PAGE = '''<!DOCTYPE html>
         
         connect(currentUser, sessionId);
         
-        // Назначение обработчиков событий
         messageInput.addEventListener('input', function(e) {
             autoResizeTextarea.call(messageInput);
             updateCharCounter();
@@ -1208,15 +1182,13 @@ HTML_PAGE = '''<!DOCTYPE html>
         toggleUsersBtn.addEventListener('click', window.toggleUsers);
         userSearch.addEventListener('keyup', filterUsers);
         
-        // Обработчики для кнопок фильтрации
-        document.querySelectorAll('.filter-btn').forEach(btn => {
+        document.querySelectorAll('.filter-btn').forEach(function(btn) {
             btn.addEventListener('click', function() {
                 window.setUserFilter(this.getAttribute('data-filter'));
             });
         });
         
-        // Обработчик для вкладки общего чата
-        const mainTab = document.querySelector('.chat-tab[data-chat="main"]');
+        var mainTab = document.querySelector('.chat-tab[data-chat="main"]');
         if (mainTab) {
             mainTab.addEventListener('click', function() {
                 window.switchChat('main');
