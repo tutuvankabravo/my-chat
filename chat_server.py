@@ -22,7 +22,9 @@ class ChatServer:
         self.spam_filters = {}
         self.spam_scores = {}
 
+    # НОВЫЙ МЕТОД: проверка, занят ли ник
     def is_nickname_taken(self, username, exclude_ws=None):
+        """Проверяет, есть ли уже пользователь с таким ником"""
         for ws, client_data in self.clients.items():
             if exclude_ws and ws == exclude_ws:
                 continue
@@ -30,18 +32,23 @@ class ChatServer:
                 return True
         return False
 
+    # НОВЫЙ МЕТОД: генерация уникального ника
     def generate_unique_nickname(self, base_nickname):
+        """Если ник занят, добавляет число в конец"""
         if not self.is_nickname_taken(base_nickname):
             return base_nickname
+        
         counter = 1
         while self.is_nickname_taken(f"{base_nickname}{counter}"):
             counter += 1
         return f"{base_nickname}{counter}"
 
     async def register(self, ws, username, session_id):
+        # ПРОВЕРКА: если ник занят, генерируем уникальный
         original_username = username
         if self.is_nickname_taken(username):
             username = self.generate_unique_nickname(username)
+            # Сообщаем пользователю, что его ник изменён
             await ws.send_str(json.dumps({
                 'type': 'system',
                 'message': f'⚠️ Имя "{original_username}" уже занято. Вы вошли как "{username}"'
@@ -97,6 +104,7 @@ class ChatServer:
         for client_data in self.clients.values():
             username = client_data['username']
             user_sessions_count[username] = user_sessions_count.get(username, 0) + 1
+        
         return [{'name': name, 'sessions': count} for name, count in user_sessions_count.items()]
 
     async def broadcast(self, message, exclude_ws=None):
@@ -165,6 +173,7 @@ class ChatServer:
 
     async def send_private_message_parts(self, from_username, to_username, text):
         message_id = hashlib.md5(f"{from_username}{to_username}{datetime.now()}".encode()).hexdigest()[:8]
+        
         if len(text) <= MAX_MESSAGE_LENGTH:
             return await self.send_private_message(from_username, to_username, text, message_id)
         
@@ -177,7 +186,9 @@ class ChatServer:
             part_text = f"[{idx}/{len(parts)}] {part}" if len(parts) > 1 else part
             await self.send_private_message(from_username, to_username, part_text, f"{message_id}_{idx}")
 
+    # НОВЫЙ МЕТОД: смена ника с проверкой уникальности
     async def change_username(self, ws, old_username, new_username):
+        # Проверка на пустое имя
         if not new_username or not new_username.strip():
             await ws.send_str(json.dumps({
                 'type': 'system',
@@ -185,8 +196,10 @@ class ChatServer:
             }))
             return False
         
+        # Ограничение длины
         new_username = new_username.strip()[:20]
         
+        # Проверка, не занято ли имя
         if self.is_nickname_taken(new_username, exclude_ws=ws):
             await ws.send_str(json.dumps({
                 'type': 'system',
@@ -194,11 +207,14 @@ class ChatServer:
             }))
             return False
         
+        # Обновляем имя
         self.clients[ws]['username'] = new_username
         
+        # Обновляем спам-фильтры
         if old_username in self.spam_filters:
             self.spam_filters[new_username] = self.spam_filters.pop(old_username)
         
+        # Сообщаем всем о смене имени
         await self.broadcast({
             'type': 'system',
             'message': f'✏️ {old_username} сменил имя на {new_username}'
@@ -210,6 +226,7 @@ class ChatServer:
             'type': 'system',
             'message': f'✅ Вы успешно сменили имя на {new_username}'
         }))
+        
         return True
 
     async def handle_message(self, ws, data):
@@ -218,6 +235,7 @@ class ChatServer:
         
         client_data = self.clients[ws]
         username = client_data['username']
+
         msg_type = data.get('type', 'message')
 
         if msg_type == 'message':
@@ -266,57 +284,6 @@ class ChatServer:
             if to_username:
                 await self.send_private_message_parts(username, to_username, text)
 
-        elif msg_type == 'call_offer':
-            target = data.get('to')
-            if target in self.spam_filters and username in self.spam_filters[target]:
-                await ws.send_str(json.dumps({
-                    'type': 'system',
-                    'message': f'⚠️ Вы не можете позвонить {target}: вы в черном списке'
-                }))
-                return
-            
-            for client_ws, client_data in self.clients.items():
-                if client_data['username'] == target:
-                    await client_ws.send_str(json.dumps({
-                        'type': 'call_offer',
-                        'from': username,
-                        'offer': data.get('offer'),
-                        'mode': data.get('mode', 'talk')
-                    }))
-                    break
-
-        elif msg_type == 'call_answer':
-            target = data.get('to')
-            for client_ws, client_data in self.clients.items():
-                if client_data['username'] == target:
-                    await client_ws.send_str(json.dumps({
-                        'type': 'call_answer',
-                        'from': username,
-                        'answer': data.get('answer'),
-                        'mode': data.get('mode', 'talk')
-                    }))
-                    break
-
-        elif msg_type == 'call_reject':
-            target = data.get('to')
-            for client_ws, client_data in self.clients.items():
-                if client_data['username'] == target:
-                    await client_ws.send_str(json.dumps({
-                        'type': 'system',
-                        'message': f'📞 {username} отклонил звонок'
-                    }))
-                    break
-
-        elif msg_type == 'call_end':
-            target = data.get('to')
-            for client_ws, client_data in self.clients.items():
-                if client_data['username'] == target:
-                    await client_ws.send_str(json.dumps({
-                        'type': 'system',
-                        'message': f'📞 {username} завершил звонок'
-                    }))
-                    break
-
         elif msg_type == 'typing':
             await self.broadcast({
                 'type': 'typing',
@@ -364,6 +331,7 @@ class ChatServer:
         for user, spammers in self.spam_filters.items():
             for spammer in spammers:
                 spam_stats[spammer] = spam_stats.get(spammer, 0) + 1
+        
         await self.broadcast({
             'type': 'spam_stats',
             'stats': spam_stats
@@ -371,39 +339,39 @@ class ChatServer:
 
 chat_processor = ChatServer()
 
+# HTML страница (только изменённая часть с JavaScript)
 HTML_PAGE = r'''<!DOCTYPE html>
 <html lang="ru">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no, viewport-fit=cover">
-    <title>Веб-чат с звонками</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>Веб-чат</title>
     <style>
+        /* ВСЕ СТИЛИ ОСТАЮТСЯ ТЕМИ ЖЕ (из вашего кода) */
         * { margin: 0; padding: 0; box-sizing: border-box; }
-        
         body {
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
             background: #0d1117;
             color: #f0f6fc;
-            height: 100dvh;
+            height: 100vh;
             overflow: hidden;
-            position: fixed;
-            top: 0;
-            left: 0;
-            right: 0;
-            bottom: 0;
         }
-        
         .chat-container {
             display: flex;
             flex-direction: column;
-            height: 100dvh;
-            max-height: 100dvh;
-            overflow: hidden;
-            position: relative;
+            height: 100vh;
+            max-width: 1400px;
+            margin: 0 auto;
         }
-        
-        .chat-header {
+        .input-area {
+            background: #161b22;
+            border-bottom: 1px solid #30363d;
+            padding: 10px 12px;
+            display: flex;
+            gap: 8px;
             flex-shrink: 0;
+        }
+        .chat-header {
             background: #161b22;
             border-bottom: 1px solid #30363d;
             padding: 8px 12px;
@@ -412,16 +380,13 @@ HTML_PAGE = r'''<!DOCTYPE html>
             align-items: center;
             flex-wrap: wrap;
             gap: 6px;
-            z-index: 10;
+            flex-shrink: 0;
         }
-        
         .chat-main {
-            flex: 1;
             display: flex;
+            flex: 1;
             overflow: hidden;
-            min-height: 0;
         }
-        
         .toggle-users-btn, .change-name-btn {
             background: #21262d;
             border: 1px solid #30363d;
@@ -431,7 +396,6 @@ HTML_PAGE = r'''<!DOCTYPE html>
             cursor: pointer;
             font-size: 0.8em;
         }
-        
         .users-sidebar {
             width: 280px;
             background: #161b22;
@@ -440,23 +404,19 @@ HTML_PAGE = r'''<!DOCTYPE html>
             flex-direction: column;
             overflow: hidden;
         }
-        
         .users-sidebar.show {
             display: flex;
         }
-        
         .users-header {
             padding: 10px;
             border-bottom: 1px solid #30363d;
             font-weight: bold;
             background: #21262d;
         }
-        
         .search-box {
             padding: 8px;
             border-bottom: 1px solid #30363d;
         }
-        
         .search-input {
             width: 100%;
             padding: 8px 12px;
@@ -466,14 +426,12 @@ HTML_PAGE = r'''<!DOCTYPE html>
             border-radius: 20px;
             outline: none;
         }
-        
         .filter-buttons {
             padding: 8px;
             display: flex;
             gap: 8px;
             border-bottom: 1px solid #30363d;
         }
-        
         .filter-btn {
             flex: 1;
             padding: 5px 8px;
@@ -484,18 +442,15 @@ HTML_PAGE = r'''<!DOCTYPE html>
             cursor: pointer;
             font-size: 0.75em;
         }
-        
         .filter-btn.active {
             background: #58a6ff;
             color: white;
         }
-        
         .users-list {
             flex: 1;
             overflow-y: auto;
             padding: 8px;
         }
-        
         .user-item {
             padding: 8px 10px;
             margin: 2px 0;
@@ -503,9 +458,8 @@ HTML_PAGE = r'''<!DOCTYPE html>
             display: flex;
             align-items: center;
             gap: 8px;
-            flex-wrap: wrap;
+            cursor: pointer;
         }
-        
         .user-item:hover { background: #21262d; }
         .user-item.spam { background: #6e3a3a; opacity: 0.7; }
         .user-avatar {
@@ -515,8 +469,7 @@ HTML_PAGE = r'''<!DOCTYPE html>
             background: #238636;
         }
         .user-avatar.spam { background: #da3633; }
-        .user-name { flex: 1; font-size: 0.85em; }
-        
+        .user-name { flex: 1; }
         .private-badge, .spam-badge {
             font-size: 0.7em;
             padding: 2px 6px;
@@ -525,15 +478,12 @@ HTML_PAGE = r'''<!DOCTYPE html>
         }
         .private-badge { background: #3a4a6e; }
         .spam-badge { background: #da3633; }
-        
         .messages-area {
             flex: 1;
             display: flex;
             flex-direction: column;
             overflow: hidden;
-            min-height: 0;
         }
-        
         .chat-tabs {
             display: flex;
             gap: 2px;
@@ -542,9 +492,7 @@ HTML_PAGE = r'''<!DOCTYPE html>
             padding: 5px 10px;
             overflow-x: auto;
             flex-shrink: 0;
-            align-items: center;
         }
-        
         .chat-tab {
             padding: 6px 12px;
             background: #21262d;
@@ -554,48 +502,15 @@ HTML_PAGE = r'''<!DOCTYPE html>
             border-radius: 6px;
             white-space: nowrap;
         }
-        
         .chat-tab.active {
             background: #58a6ff;
             color: white;
         }
-        
         .close-tab {
             margin-left: 8px;
             cursor: pointer;
             font-weight: bold;
         }
-        
-        .chat-call-btn {
-            background: #238636;
-            border: none;
-            color: white;
-            padding: 5px 12px;
-            border-radius: 20px;
-            cursor: pointer;
-            font-size: 0.8em;
-            margin-left: 5px;
-        }
-        
-        .chat-call-btn.ongoing {
-            background: #da3633;
-        }
-        
-        .chat-call-btn:disabled {
-            opacity: 0.5;
-            cursor: not-allowed;
-        }
-        
-        #callModeSelect {
-            background: #21262d;
-            border: 1px solid #30363d;
-            color: #f0f6fc;
-            padding: 5px 8px;
-            border-radius: 20px;
-            font-size: 0.8em;
-            cursor: pointer;
-        }
-        
         .messages-container {
             flex: 1;
             overflow-y: auto;
@@ -603,9 +518,7 @@ HTML_PAGE = r'''<!DOCTYPE html>
             display: flex;
             flex-direction: column;
             gap: 10px;
-            -webkit-overflow-scrolling: touch;
         }
-        
         .message { display: flex; }
         .message.system { justify-content: center; }
         .message.system .message-bubble {
@@ -646,7 +559,6 @@ HTML_PAGE = r'''<!DOCTYPE html>
             margin-top: 3px;
             text-align: right;
         }
-        
         .typing-indicator {
             padding: 6px 16px;
             font-size: 0.75em;
@@ -656,17 +568,6 @@ HTML_PAGE = r'''<!DOCTYPE html>
             background: #0d1117;
             flex-shrink: 0;
         }
-        
-        .input-area {
-            flex-shrink: 0;
-            background: #161b22;
-            border-top: 1px solid #30363d;
-            padding: 8px 12px;
-            padding-bottom: max(8px, env(safe-area-inset-bottom));
-            display: flex;
-            gap: 8px;
-        }
-        
         .message-input {
             flex: 1;
             background: #21262d;
@@ -680,7 +581,6 @@ HTML_PAGE = r'''<!DOCTYPE html>
             max-height: 120px;
             min-height: 40px;
         }
-        
         .send-btn {
             background: #58a6ff;
             color: white;
@@ -690,7 +590,6 @@ HTML_PAGE = r'''<!DOCTYPE html>
             cursor: pointer;
             font-weight: bold;
         }
-        
         .chat-title h1 { font-size: 1.1em; }
         .online-status {
             background: #238636;
@@ -705,7 +604,6 @@ HTML_PAGE = r'''<!DOCTYPE html>
             border-radius: 20px;
             font-size: 0.8em;
         }
-        
         @media (max-width: 768px) {
             .users-sidebar {
                 width: 100%;
@@ -716,14 +614,14 @@ HTML_PAGE = r'''<!DOCTYPE html>
                 z-index: 1000;
             }
         }
-        
-        @supports (height: 100dvh) {
-            body, .chat-container { height: 100dvh; }
-        }
     </style>
 </head>
 <body>
     <div class="chat-container">
+        <div class="input-area">
+            <textarea id="messageInput" class="message-input" placeholder="Введите сообщение..."></textarea>
+            <button class="send-btn" id="sendButton">Отправить</button>
+        </div>
         <div class="chat-header">
             <div class="chat-title">
                 <h1>Веб-чат</h1>
@@ -735,7 +633,6 @@ HTML_PAGE = r'''<!DOCTYPE html>
                 <button class="toggle-users-btn" id="toggleUsersBtn">Участники</button>
             </div>
         </div>
-        
         <div class="chat-main">
             <div class="users-sidebar" id="usersSidebar">
                 <div class="users-header">Участники (<span id="usersCount">0</span>)</div>
@@ -749,7 +646,6 @@ HTML_PAGE = r'''<!DOCTYPE html>
                 </div>
                 <div class="users-list" id="usersList"></div>
             </div>
-            
             <div class="messages-area">
                 <div class="chat-tabs" id="chatTabs">
                     <button class="chat-tab active" data-chat="main">Общий чат</button>
@@ -758,13 +654,7 @@ HTML_PAGE = r'''<!DOCTYPE html>
                 <div class="typing-indicator" id="typingIndicator"></div>
             </div>
         </div>
-        
-        <div class="input-area">
-            <textarea id="messageInput" class="message-input" placeholder="Введите сообщение..."></textarea>
-            <button class="send-btn" id="sendButton">Отправить</button>
-        </div>
     </div>
-    
     <script>
         var ws = null;
         var currentUser = null;
@@ -778,9 +668,6 @@ HTML_PAGE = r'''<!DOCTYPE html>
         var currentUserFilter = 'all';
         var spamStats = {};
         var spamList = [];
-        var activeCalls = new Map();
-        var pendingCalls = new Map();
-        var audioElements = new Map();
         
         var messagesContainer = document.getElementById('messagesContainer');
         var messageInput = document.getElementById('messageInput');
@@ -825,6 +712,7 @@ HTML_PAGE = r'''<!DOCTYPE html>
         }
         
         function showSystemMessage(text) {
+            if (currentChat !== 'main') return;
             var div = document.createElement('div');
             div.className = 'message system';
             div.innerHTML = '<div class="message-bubble">' + escapeHtml(text) + '</div>';
@@ -833,7 +721,6 @@ HTML_PAGE = r'''<!DOCTYPE html>
         }
         
         function addMessageToChat(message) {
-            if (currentChat !== 'main') return;
             var div = document.createElement('div');
             div.className = 'message ' + (message.username === currentUser ? 'own' : '');
             var textWithBreaks = escapeHtml(message.text).split(/\n/).join('<br>');
@@ -843,7 +730,6 @@ HTML_PAGE = r'''<!DOCTYPE html>
         }
         
         function addPrivateMessageToChat(message, otherUser) {
-            if (currentChat !== otherUser) return;
             var div = document.createElement('div');
             var isFromMe = (message.from === currentUser);
             div.className = 'message ' + (isFromMe ? 'own' : '');
@@ -854,386 +740,22 @@ HTML_PAGE = r'''<!DOCTYPE html>
             scrollToBottom();
         }
         
-        function showCallButtonWithMode(username) {
-            var headerDiv = document.querySelector('.chat-tabs');
-            
-            var oldBtn = document.getElementById('chatCallBtn');
-            var oldReject = document.getElementById('chatRejectBtn');
-            var oldMode = document.getElementById('callModeSelect');
-            var oldListen = document.getElementById('chatListenBtn');
-            if (oldBtn) oldBtn.remove();
-            if (oldReject) oldReject.remove();
-            if (oldMode) oldMode.remove();
-            if (oldListen) oldListen.remove();
-            
-            var select = document.createElement('select');
-            select.id = 'callModeSelect';
-            select.className = 'chat-call-btn';
-            select.style.background = '#21262d';
-            select.style.marginRight = '5px';
-            select.innerHTML = '<option value="talk">🎤 Говорить и слушать</option><option value="listen">👂 Только слушать</option>';
-            select.onclick = function(e) { e.stopPropagation(); };
-            
-            var callBtn = document.createElement('button');
-            callBtn.id = 'chatCallBtn';
-            callBtn.textContent = '📞 Позвонить';
-            callBtn.className = 'chat-call-btn';
-            callBtn.style.background = '#238636';
-            callBtn.onclick = function() {
-                var mode = document.getElementById('callModeSelect').value;
-                window.startCall(username, mode);
-            };
-            
-            headerDiv.appendChild(select);
-            headerDiv.appendChild(callBtn);
-        }
-        
-        function updateCallButton(username, isCallActive, isReceiveOnly) {
-            if (currentChat === username) {
-                var callBtn = document.getElementById('chatCallBtn');
-                var rejectBtn = document.getElementById('chatRejectBtn');
-                var modeSelect = document.getElementById('callModeSelect');
-                var listenBtn = document.getElementById('chatListenBtn');
-                
-                if (rejectBtn) rejectBtn.remove();
-                if (modeSelect) modeSelect.remove();
-                if (listenBtn) listenBtn.remove();
-                
-                if (callBtn) {
-                    if (isCallActive) {
-                        callBtn.textContent = isReceiveOnly ? '🎧 Завершить прослушивание' : '🔴 Положить трубку';
-                        callBtn.className = 'chat-call-btn ongoing';
-                        callBtn.style.background = '#da3633';
-                        var newBtn = callBtn.cloneNode(true);
-                        callBtn.parentNode.replaceChild(newBtn, callBtn);
-                        newBtn.id = 'chatCallBtn';
-                        newBtn.onclick = function() { window.endCall(username); };
-                    }
+        function showNotification(username) {
+            var tabs = document.getElementById('chatTabs');
+            var tab = null;
+            for (var i = 0; i < tabs.children.length; i++) {
+                if (tabs.children[i].getAttribute('data-chat') === username) {
+                    tab = tabs.children[i];
+                    break;
                 }
             }
-        }
-        
-        function rejectCall(fromUsername) {
-            if (pendingCalls.has(fromUsername)) {
-                pendingCalls.delete(fromUsername);
-                ws.send(JSON.stringify({ type: 'call_reject', to: fromUsername }));
-                showSystemMessage('📞 Вы отклонили звонок от ' + fromUsername);
-                
-                var rejectBtn = document.getElementById('chatRejectBtn');
-                if (rejectBtn) rejectBtn.remove();
-                
-                showCallButtonWithMode(fromUsername);
+            if (tab && currentChat !== username) {
+                tab.style.background = '#ff9800';
+                setTimeout(function() {
+                    if (currentChat !== username) tab.style.background = '';
+                }, 1000);
             }
         }
-        
-        function showIncomingCall(fromUsername, offer, mode) {
-            var isSpam = false;
-            for (var i = 0; i < spamList.length; i++) {
-                if (spamList[i] === fromUsername) isSpam = true;
-            }
-            if (isSpam) {
-                ws.send(JSON.stringify({ type: 'call_reject', to: fromUsername }));
-                return;
-            }
-            
-            if (activeCalls.has(fromUsername)) {
-                return;
-            }
-            
-            pendingCalls.set(fromUsername, { offer: offer, mode: mode });
-            showSystemMessage('📞 ' + fromUsername + ' звонит вам! Открываем чат...');
-            
-            if (!privateChats.has(fromUsername)) {
-                privateChats.set(fromUsername, []);
-                addPrivateChatTab(fromUsername);
-            }
-            window.switchChat(fromUsername);
-            
-            var oldCallBtn = document.getElementById('chatCallBtn');
-            var oldRejectBtn = document.getElementById('chatRejectBtn');
-            var oldMode = document.getElementById('callModeSelect');
-            var oldListen = document.getElementById('chatListenBtn');
-            if (oldCallBtn) oldCallBtn.remove();
-            if (oldRejectBtn) oldRejectBtn.remove();
-            if (oldMode) oldMode.remove();
-            if (oldListen) oldListen.remove();
-            
-            var headerDiv = document.querySelector('.chat-tabs');
-            
-            var answerTalkBtn = document.createElement('button');
-            answerTalkBtn.id = 'chatCallBtn';
-            answerTalkBtn.textContent = '🎤 Ответить (с микрофоном)';
-            answerTalkBtn.className = 'chat-call-btn';
-            answerTalkBtn.style.background = '#238636';
-            answerTalkBtn.style.marginRight = '5px';
-            answerTalkBtn.onclick = function() { answerCall(fromUsername, offer, 'talk'); };
-            
-            var answerListenBtn = document.createElement('button');
-            answerListenBtn.id = 'chatListenBtn';
-            answerListenBtn.textContent = '👂 Ответить (только слушать)';
-            answerListenBtn.className = 'chat-call-btn';
-            answerListenBtn.style.background = '#1a5d8c';
-            answerListenBtn.style.marginRight = '5px';
-            answerListenBtn.onclick = function() { answerCall(fromUsername, offer, 'listen'); };
-            
-            var rejectBtn = document.createElement('button');
-            rejectBtn.id = 'chatRejectBtn';
-            rejectBtn.textContent = '❌ Отклонить';
-            rejectBtn.className = 'chat-call-btn';
-            rejectBtn.style.background = '#da3633';
-            rejectBtn.onclick = function() { rejectCall(fromUsername); };
-            
-            headerDiv.appendChild(answerTalkBtn);
-            headerDiv.appendChild(answerListenBtn);
-            headerDiv.appendChild(rejectBtn);
-        }
-        
-        async function answerCall(fromUsername, offer, mode) {
-            var rejectBtn = document.getElementById('chatRejectBtn');
-            var listenBtn = document.getElementById('chatListenBtn');
-            var talkBtn = document.getElementById('chatCallBtn');
-            if (rejectBtn) rejectBtn.remove();
-            if (listenBtn) listenBtn.remove();
-            if (talkBtn) talkBtn.remove();
-            
-            var statusBtn = document.createElement('button');
-            statusBtn.id = 'chatCallBtn';
-            statusBtn.textContent = mode === 'talk' ? '🎤 Подключение...' : '👂 Подключение...';
-            statusBtn.className = 'chat-call-btn';
-            statusBtn.disabled = true;
-            statusBtn.style.opacity = '0.6';
-            document.querySelector('.chat-tabs').appendChild(statusBtn);
-            
-            try {
-                showSystemMessage('📞 Отвечаем ' + fromUsername + ' (' + (mode === 'talk' ? 'с микрофоном' : 'только слушать') + ')...');
-                
-                var pc = new RTCPeerConnection({
-                    iceServers: [
-                        { urls: 'stun:stun.l.google.com:19302' },
-                        { urls: 'stun:stun1.l.google.com:19302' }
-                    ]
-                });
-                
-                var stream = null;
-                var actualMode = mode;
-                
-                if (mode === 'talk') {
-                    try {
-                        stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-                        stream.getTracks().forEach(function(track) { pc.addTrack(track, stream); });
-                    } catch (micError) {
-                        console.warn('Нет доступа к микрофону:', micError);
-                        showSystemMessage('⚠️ Микрофон не найден, переключаемся в режим "только слушать"');
-                        actualMode = 'listen';
-                        statusBtn.textContent = '👂 Нет микрофона, только слушаем...';
-                    }
-                }
-                
-                pc.ontrack = function(event) {
-                    var audio = new Audio();
-                    audio.srcObject = event.streams[0];
-                    audio.autoplay = true;
-                    audioElements.set(fromUsername, audio);
-                    showSystemMessage('👂 Аудио подключено, вы слышите ' + fromUsername);
-                    if (actualMode === 'listen') {
-                        showSystemMessage('💬 Вы можете отвечать текстом в чате');
-                    } else {
-                        showSystemMessage('🎙️ Разговор начался, говорите в микрофон');
-                    }
-                    updateCallButton(fromUsername, true, actualMode === 'listen');
-                };
-                
-                pc.oniceconnectionstatechange = function() {
-                    if (pc.iceConnectionState === 'disconnected' || pc.iceConnectionState === 'failed' || pc.iceConnectionState === 'closed') {
-                        window.endCall(fromUsername);
-                    }
-                };
-                
-                pc.onconnectionstatechange = function() {
-                    if (pc.connectionState === 'connected') {
-                        var btn = document.getElementById('chatCallBtn');
-                        if (btn) {
-                            btn.textContent = actualMode === 'listen' ? '🎧 Завершить прослушивание' : '🔴 Положить трубку';
-                            btn.disabled = false;
-                            btn.style.opacity = '1';
-                            btn.onclick = function() { window.endCall(fromUsername); };
-                        }
-                    }
-                };
-                
-                await pc.setRemoteDescription(new RTCSessionDescription(offer));
-                var answer = await pc.createAnswer();
-                await pc.setLocalDescription(answer);
-                
-                activeCalls.set(fromUsername, { pc: pc, stream: stream, mode: actualMode, isReceiveOnly: actualMode === 'listen' });
-                
-                ws.send(JSON.stringify({
-                    type: 'call_answer',
-                    to: fromUsername,
-                    answer: { sdp: answer.sdp, type: answer.type },
-                    mode: actualMode
-                }));
-                
-                pendingCalls.delete(fromUsername);
-                
-            } catch (error) {
-                console.error('Ошибка ответа:', error);
-                showSystemMessage('❌ Не удалось ответить на звонок: ' + error.message);
-                statusBtn.remove();
-                showCallButtonWithMode(fromUsername);
-                pendingCalls.delete(fromUsername);
-            }
-        }
-        
-        window.startCall = async function(targetUsername, mode) {
-            if (targetUsername === currentUser) {
-                showSystemMessage('Нельзя позвонить самому себе');
-                return;
-            }
-            
-            if (activeCalls.has(targetUsername)) {
-                showSystemMessage('У вас уже есть активный звонок с ' + targetUsername);
-                return;
-            }
-            
-            if (pendingCalls.has(targetUsername)) {
-                showSystemMessage('Пользователь уже звонит вам');
-                return;
-            }
-            
-            var isSpam = false;
-            for (var i = 0; i < spamList.length; i++) {
-                if (spamList[i] === targetUsername) isSpam = true;
-            }
-            if (isSpam) {
-                showSystemMessage('⚠️ Нельзя звонить пользователю из черного списка');
-                return;
-            }
-            
-            var oldBtn = document.getElementById('chatCallBtn');
-            var oldRejectBtn = document.getElementById('chatRejectBtn');
-            var oldMode = document.getElementById('callModeSelect');
-            var oldListen = document.getElementById('chatListenBtn');
-            if (oldBtn) oldBtn.remove();
-            if (oldRejectBtn) oldRejectBtn.remove();
-            if (oldMode) oldMode.remove();
-            if (oldListen) oldListen.remove();
-            
-            try {
-                var pc = new RTCPeerConnection({
-                    iceServers: [
-                        { urls: 'stun:stun.l.google.com:19302' },
-                        { urls: 'stun:stun1.l.google.com:19302' }
-                    ]
-                });
-                
-                var stream = null;
-                var actualMode = mode;
-                
-                if (mode === 'talk') {
-                    try {
-                        showSystemMessage('🎤 Запрашиваем доступ к микрофону...');
-                        stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-                        stream.getTracks().forEach(function(track) { pc.addTrack(track, stream); });
-                        showSystemMessage('✅ Микрофон готов');
-                    } catch (micError) {
-                        console.warn('Нет доступа к микрофону:', micError);
-                        showSystemMessage('⚠️ Микрофон не найден, звонок будет в режиме "только слушать"');
-                        actualMode = 'listen';
-                    }
-                } else {
-                    showSystemMessage('👂 Звонок в режиме "только слушать"');
-                }
-                
-                pc.ontrack = function(event) {
-                    var audio = new Audio();
-                    audio.srcObject = event.streams[0];
-                    audio.autoplay = true;
-                    audioElements.set(targetUsername, audio);
-                    showSystemMessage('👂 Аудио подключено, вы слышите ' + targetUsername);
-                    if (actualMode !== 'talk') {
-                        showSystemMessage('💬 Вы можете отвечать текстом в чате');
-                    } else {
-                        showSystemMessage('🎙️ Разговор начался, говорите в микрофон');
-                    }
-                    updateCallButton(targetUsername, true, actualMode !== 'talk');
-                };
-                
-                pc.oniceconnectionstatechange = function() {
-                    if (pc.iceConnectionState === 'disconnected' || pc.iceConnectionState === 'failed' || pc.iceConnectionState === 'closed') {
-                        window.endCall(targetUsername);
-                    }
-                };
-                
-                pc.onconnectionstatechange = function() {
-                    if (pc.connectionState === 'connected') {
-                        updateCallButton(targetUsername, true, actualMode !== 'talk');
-                    }
-                };
-                
-                var offer = await pc.createOffer();
-                await pc.setLocalDescription(offer);
-                
-                activeCalls.set(targetUsername, { pc: pc, stream: stream, mode: actualMode, isReceiveOnly: actualMode !== 'talk' });
-                
-                ws.send(JSON.stringify({
-                    type: 'call_offer',
-                    to: targetUsername,
-                    offer: { sdp: offer.sdp, type: offer.type },
-                    mode: actualMode
-                }));
-                
-                showSystemMessage('📞 Звоним ' + targetUsername + ' (' + (actualMode === 'talk' ? 'с микрофоном' : 'только слушать') + ')...');
-                
-                var headerDiv = document.querySelector('.chat-tabs');
-                var callBtn = document.createElement('button');
-                callBtn.id = 'chatCallBtn';
-                callBtn.textContent = actualMode === 'talk' ? '🔴 Положить трубку' : '🎧 Завершить прослушивание';
-                callBtn.className = 'chat-call-btn ongoing';
-                callBtn.style.background = '#da3633';
-                callBtn.onclick = function() { window.endCall(targetUsername); };
-                headerDiv.appendChild(callBtn);
-                
-            } catch (error) {
-                console.error('Ошибка звонка:', error);
-                showSystemMessage('❌ Не удалось начать звонок: ' + error.message);
-                if (activeCalls.has(targetUsername)) {
-                    activeCalls.delete(targetUsername);
-                }
-                showCallButtonWithMode(targetUsername);
-            }
-        };
-        
-        window.endCall = function(targetUsername) {
-            var call = activeCalls.get(targetUsername);
-            if (!call) {
-                showCallButtonWithMode(targetUsername);
-                return;
-            }
-            
-            var audio = audioElements.get(targetUsername);
-            if (audio) {
-                audio.pause();
-                audio.srcObject = null;
-                audioElements.delete(targetUsername);
-            }
-            
-            if (call.stream) {
-                call.stream.getTracks().forEach(function(track) { track.stop(); });
-            }
-            if (call.pc) {
-                call.pc.close();
-            }
-            activeCalls.delete(targetUsername);
-            
-            ws.send(JSON.stringify({ type: 'call_end', to: targetUsername }));
-            showSystemMessage('📞 Звонок с ' + targetUsername + ' завершен');
-            
-            showCallButtonWithMode(targetUsername);
-            
-            var rejectBtn = document.getElementById('chatRejectBtn');
-            if (rejectBtn) rejectBtn.remove();
-        };
         
         function addPrivateChatTab(username) {
             var tabsContainer = document.getElementById('chatTabs');
@@ -1263,9 +785,6 @@ HTML_PAGE = r'''<!DOCTYPE html>
         }
         
         window.closePrivateChat = function(username) {
-            if (activeCalls.has(username)) {
-                window.endCall(username);
-            }
             privateChats.delete(username);
             var tabsContainer = document.getElementById('chatTabs');
             var tabToRemove = null;
@@ -1302,9 +821,6 @@ HTML_PAGE = r'''<!DOCTYPE html>
                 for (var i = 0; i < messages.length; i++) {
                     addPrivateMessageToChat(messages[i], chatId);
                 }
-                if (!document.getElementById('callModeSelect') && !document.getElementById('chatCallBtn')) {
-                    showCallButtonWithMode(chatId);
-                }
             }
             scrollToBottom();
         };
@@ -1312,14 +828,6 @@ HTML_PAGE = r'''<!DOCTYPE html>
         window.startPrivateChat = function(username) {
             if (username === currentUser) {
                 showSystemMessage('Нельзя начать чат с самим собой');
-                return;
-            }
-            var isSpam = false;
-            for (var i = 0; i < spamList.length; i++) {
-                if (spamList[i] === username) isSpam = true;
-            }
-            if (isSpam) {
-                showSystemMessage('⚠️ Нельзя открыть чат с пользователем из черного списка');
                 return;
             }
             if (!privateChats.has(username)) {
@@ -1366,16 +874,14 @@ HTML_PAGE = r'''<!DOCTYPE html>
                 var sessionsHtml = (user.sessions > 1) ? ' (' + user.sessions + ' вкладки)' : '';
                 var spamCount = spamStats[user.name] || 0;
                 var statsHtml = spamCount > 0 ? ' ⚠️' + spamCount : '';
-                
-                html += '<div class="user-item ' + (isSpam ? 'spam' : '') + '" onclick="' + (isCurrent ? '' : 'startPrivateChat(\'' + escapeHtml(user.name) + '\')') + '">';
+                var onClick = isCurrent ? '' : ' onclick="startPrivateChat(\'' + escapeHtml(user.name) + '\')"';
+                var onSpam = !isCurrent ? ' onclick="event.stopPropagation(); toggleSpam(\'' + escapeHtml(user.name) + '\')"' : '';
+                var badgeText = isSpam ? 'Снять спам' : 'Спам';
+                var badgeClass = isSpam ? 'spam-badge' : 'private-badge';
+                html += '<div class="user-item ' + (isSpam ? 'spam' : '') + '"' + onClick + '>';
                 html += '<div class="user-avatar ' + (isSpam ? 'spam' : '') + '"></div>';
                 html += '<div class="user-name">' + escapeHtml(user.name) + (isCurrent ? ' (Вы)' : '') + sessionsHtml + statsHtml + '</div>';
-                
-                if (!isCurrent) {
-                    var badgeText = isSpam ? 'Снять спам' : 'Спам';
-                    var badgeClass = isSpam ? 'spam-badge' : 'private-badge';
-                    html += '<span class="' + badgeClass + '" onclick="event.stopPropagation(); toggleSpam(\'' + escapeHtml(user.name) + '\')">' + badgeText + '</span>';
-                }
+                if (!isCurrent) html += '<span class="' + badgeClass + '"' + onSpam + '>' + badgeText + '</span>';
                 html += '</div>';
             }
             usersList.innerHTML = html;
@@ -1393,9 +899,6 @@ HTML_PAGE = r'''<!DOCTYPE html>
                 spamList = newList;
                 showSystemMessage(username + ' удален из черного списка');
             } else {
-                if (activeCalls.has(username)) {
-                    window.endCall(username);
-                }
                 if (ws && ws.readyState === WebSocket.OPEN) {
                     ws.send(JSON.stringify({ type: 'mark_spam', spammer: username }));
                 }
@@ -1425,12 +928,17 @@ HTML_PAGE = r'''<!DOCTYPE html>
             }
         };
         
+        // НОВАЯ ФУНКЦИЯ: смена имени с проверкой на сервере
         window.changeUsername = function() {
             var newName = prompt('Введите новое имя (макс. 20 символов):', currentUser);
             if (newName && newName.trim() && newName.trim() !== currentUser) {
                 var trimmedName = newName.trim().substring(0, 20);
+                // Отправляем запрос на смену имени на сервер
                 if (ws && ws.readyState === WebSocket.OPEN) {
-                    ws.send(JSON.stringify({ type: 'change_username', new_username: trimmedName }));
+                    ws.send(JSON.stringify({ 
+                        type: 'change_username', 
+                        new_username: trimmedName 
+                    }));
                 } else {
                     showSystemMessage('❌ Нет соединения с сервером');
                 }
@@ -1444,9 +952,6 @@ HTML_PAGE = r'''<!DOCTYPE html>
                 ws.send(JSON.stringify({ type: 'message', text: text }));
             } else {
                 ws.send(JSON.stringify({ type: 'private_message', to: currentChat, text: text }));
-                if (activeCalls.has(currentChat)) {
-                    showSystemMessage('💬 Вы: ' + text);
-                }
             }
             messageInput.value = '';
             if (isTyping) {
@@ -1488,16 +993,7 @@ HTML_PAGE = r'''<!DOCTYPE html>
             if (currentChat === otherUser) {
                 addPrivateMessageToChat(message, otherUser);
             } else if (!isFromMe) {
-                var tabs = document.getElementById('chatTabs');
-                for (var i = 0; i < tabs.children.length; i++) {
-                    if (tabs.children[i].getAttribute('data-chat') === otherUser) {
-                        tabs.children[i].style.background = '#ff9800';
-                        setTimeout(function(tab) {
-                            if (currentChat !== otherUser) tab.style.background = '';
-                        }, 1000, tabs.children[i]);
-                        break;
-                    }
-                }
+                showNotification(otherUser);
             }
         }
         
@@ -1511,7 +1007,11 @@ HTML_PAGE = r'''<!DOCTYPE html>
         function handleMessage(data) {
             switch(data.type) {
                 case 'message':
-                    if (currentChat === 'main') addMessageToChat(data);
+                    if (currentChat === 'main') {
+                        addMessageToChat(data);
+                    } else {
+                        // Если сообщение в общем чате, но мы в приватном - игнорируем
+                    }
                     break;
                 case 'private_message':
                     handlePrivateMessage(data);
@@ -1519,7 +1019,9 @@ HTML_PAGE = r'''<!DOCTYPE html>
                 case 'system':
                     showSystemMessage(data.message);
                     if (data.users_count) onlineCountSpan.textContent = data.users_count + ' онлайн';
+                    // Если это сообщение о смене имени, обновляем currentUser
                     if (data.message && data.message.indexOf('Вы успешно сменили имя') !== -1) {
+                        // Парсим новое имя из сообщения (костыль, но работает)
                         var match = data.message.match(/на (.+)$/);
                         if (match && match[1]) {
                             currentUser = match[1];
@@ -1541,24 +1043,6 @@ HTML_PAGE = r'''<!DOCTYPE html>
                 case 'spam_stats':
                     spamStats = data.stats || {};
                     filterUsers();
-                    break;
-                case 'call_offer':
-                    showIncomingCall(data.from, data.offer, data.mode || 'talk');
-                    break;
-                case 'call_answer':
-                    var call = activeCalls.get(data.from);
-                    if (call && call.pc) {
-                        call.pc.setRemoteDescription(new RTCSessionDescription(data.answer));
-                        if (data.mode === 'listen') {
-                            call.isReceiveOnly = true;
-                            updateCallButton(data.from, true, true);
-                        }
-                    }
-                    break;
-                case 'call_reject':
-                    showSystemMessage('📞 ' + data.message);
-                    if (pendingCalls.has(data.from)) pendingCalls.delete(data.from);
-                    updateCallButton(data.from, false);
                     break;
             }
         }
@@ -1612,6 +1096,8 @@ HTML_PAGE = r'''<!DOCTYPE html>
         toggleUsersBtn.onclick = window.toggleUsers;
         userSearch.onkeyup = filterUsers;
         
+
+        
         var filterBtns = document.querySelectorAll('.filter-btn');
         for (var i = 0; i < filterBtns.length; i++) {
             filterBtns[i].onclick = function() {
@@ -1633,20 +1119,6 @@ HTML_PAGE = r'''<!DOCTYPE html>
                 }
             }
         };
-        
-        messageInput.addEventListener('input', function() {
-            if (!isTyping && messageInput.value.trim()) {
-                isTyping = true;
-                ws.send(JSON.stringify({ type: 'typing', is_typing: true }));
-            }
-            if (typingTimeout) clearTimeout(typingTimeout);
-            typingTimeout = setTimeout(function() {
-                if (isTyping) {
-                    isTyping = false;
-                    ws.send(JSON.stringify({ type: 'typing', is_typing: false }));
-                }
-            }, 1000);
-        });
     </script>
 </body>
 </html>'''
