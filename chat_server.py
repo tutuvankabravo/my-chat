@@ -985,10 +985,7 @@ HTML_PAGE = r'''<!DOCTYPE html>
         <!-- НИЖНЯЯ ПАНЕЛЬ ВВОДА -->
         <div class="input-area">
             <textarea id="messageInput" class="message-input" placeholder="Введите сообщение..."></textarea>
-            <button class="send-btn" id="sendButton">
-                Отправить
-                <span id="totalUnread" class="total-unread" style="display: none;">0</span>
-            </button>
+            <button class="send-btn" id="sendButton">Отправить</button>
         </div>
     </div>
 
@@ -1045,7 +1042,7 @@ HTML_PAGE = r'''<!DOCTYPE html>
         
         // Счётчики непрочитанных сообщений
         var unreadCounts = {}; // { "имя_пользователя": количество }
-        var totalUnread = 0;
+        
         
         // DOM элементы
         var authScreen = document.getElementById('authScreen');
@@ -1069,15 +1066,7 @@ HTML_PAGE = r'''<!DOCTYPE html>
         
         window.messagesHistory = [];
         
-        // === ФУНКЦИИ ДЛЯ РАБОТЫ СО СЧЁТЧИКАМИ ===
-        function updateTotalUnreadDisplay() {
-            if (totalUnread > 0) {
-                totalUnreadSpan.textContent = totalUnread > 99 ? '99+' : totalUnread;
-                totalUnreadSpan.style.display = 'inline-block';
-            } else {
-                totalUnreadSpan.style.display = 'none';
-            }
-        }
+
         
         function incrementUnreadCount(fromUser) {
             if (fromUser === currentUser) return;
@@ -1087,18 +1076,18 @@ HTML_PAGE = r'''<!DOCTYPE html>
                 unreadCounts[fromUser] = 0;
             }
             unreadCounts[fromUser]++;
-            totalUnread++;
             
-            updateTotalUnreadDisplay();
+            
+            
             updateUsersListDisplay();
             updateTabUnread(fromUser);
         }
         
         function clearUnreadCount(user) {
             if (unreadCounts[user]) {
-                totalUnread -= unreadCounts[user];
+                
                 unreadCounts[user] = 0;
-                updateTotalUnreadDisplay();
+                
                 updateUsersListDisplay();
                 updateTabUnread(user);
             }
