@@ -22,7 +22,38 @@ class ChatServer:
         self.spam_filters = {}
         self.spam_scores = {}
 
+    # НОВЫЙ МЕТОД: проверка, занят ли ник
+    def is_nickname_taken(self, username, exclude_ws=None):
+        """Проверяет, есть ли уже пользователь с таким ником"""
+        for ws, client_data in self.clients.items():
+            if exclude_ws and ws == exclude_ws:
+                continue
+            if client_data['username'] == username:
+                return True
+        return False
+
+    # НОВЫЙ МЕТОД: генерация уникального ника
+    def generate_unique_nickname(self, base_nickname):
+        """Если ник занят, добавляет число в конец"""
+        if not self.is_nickname_taken(base_nickname):
+            return base_nickname
+        
+        counter = 1
+        while self.is_nickname_taken(f"{base_nickname}{counter}"):
+            counter += 1
+        return f"{base_nickname}{counter}"
+
     async def register(self, ws, username, session_id):
+        # ПРОВЕРКА: если ник занят, генерируем уникальный
+        original_username = username
+        if self.is_nickname_taken(username):
+            username = self.generate_unique_nickname(username)
+            # Сообщаем пользователю, что его ник изменён
+            await ws.send_str(json.dumps({
+                'type': 'system',
+                'message': f'⚠️ Имя "{original_username}" уже занято. Вы вошли как "{username}"'
+            }))
+        
         self.clients[ws] = {'username': username, 'session_id': session_id}
         connected_clients.add(ws)
         
@@ -155,6 +186,49 @@ class ChatServer:
             part_text = f"[{idx}/{len(parts)}] {part}" if len(parts) > 1 else part
             await self.send_private_message(from_username, to_username, part_text, f"{message_id}_{idx}")
 
+    # НОВЫЙ МЕТОД: смена ника с проверкой уникальности
+    async def change_username(self, ws, old_username, new_username):
+        # Проверка на пустое имя
+        if not new_username or not new_username.strip():
+            await ws.send_str(json.dumps({
+                'type': 'system',
+                'message': '❌ Имя не может быть пустым'
+            }))
+            return False
+        
+        # Ограничение длины
+        new_username = new_username.strip()[:20]
+        
+        # Проверка, не занято ли имя
+        if self.is_nickname_taken(new_username, exclude_ws=ws):
+            await ws.send_str(json.dumps({
+                'type': 'system',
+                'message': f'❌ Имя "{new_username}" уже занято. Выберите другое'
+            }))
+            return False
+        
+        # Обновляем имя
+        self.clients[ws]['username'] = new_username
+        
+        # Обновляем спам-фильтры
+        if old_username in self.spam_filters:
+            self.spam_filters[new_username] = self.spam_filters.pop(old_username)
+        
+        # Сообщаем всем о смене имени
+        await self.broadcast({
+            'type': 'system',
+            'message': f'✏️ {old_username} сменил имя на {new_username}'
+        })
+        
+        await self.broadcast_users_list()
+        
+        await ws.send_str(json.dumps({
+            'type': 'system',
+            'message': f'✅ Вы успешно сменили имя на {new_username}'
+        }))
+        
+        return True
+
     async def handle_message(self, ws, data):
         if ws not in self.clients:
             return
@@ -199,6 +273,10 @@ class ChatServer:
                     if len(messages_history) > MAX_HISTORY:
                         messages_history.pop(0)
                     await self.broadcast(message)
+
+        elif msg_type == 'change_username':
+            new_username = data.get('new_username', '')
+            await self.change_username(ws, username, new_username)
 
         elif msg_type == 'private_message':
             to_username = data.get('to')
@@ -261,7 +339,7 @@ class ChatServer:
 
 chat_processor = ChatServer()
 
-# ВАЖНО: Используем raw-строку (r'''...''') для правильной обработки JavaScript
+# HTML страница (только изменённая часть с JavaScript)
 HTML_PAGE = r'''<!DOCTYPE html>
 <html lang="ru">
 <head>
@@ -269,6 +347,7 @@ HTML_PAGE = r'''<!DOCTYPE html>
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
     <title>Веб-чат</title>
     <style>
+        /* ВСЕ СТИЛИ ОСТАЮТСЯ ТЕМИ ЖЕ (из вашего кода) */
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
@@ -849,6 +928,23 @@ HTML_PAGE = r'''<!DOCTYPE html>
             }
         };
         
+        // НОВАЯ ФУНКЦИЯ: смена имени с проверкой на сервере
+        window.changeUsername = function() {
+            var newName = prompt('Введите новое имя (макс. 20 символов):', currentUser);
+            if (newName && newName.trim() && newName.trim() !== currentUser) {
+                var trimmedName = newName.trim().substring(0, 20);
+                // Отправляем запрос на смену имени на сервер
+                if (ws && ws.readyState === WebSocket.OPEN) {
+                    ws.send(JSON.stringify({ 
+                        type: 'change_username', 
+                        new_username: trimmedName 
+                    }));
+                } else {
+                    showSystemMessage('❌ Нет соединения с сервером');
+                }
+            }
+        };
+        
         window.sendMessage = function() {
             var text = messageInput.value;
             if (!text.trim() || !ws || ws.readyState !== WebSocket.OPEN) return;
@@ -911,7 +1007,11 @@ HTML_PAGE = r'''<!DOCTYPE html>
         function handleMessage(data) {
             switch(data.type) {
                 case 'message':
-                    if (currentChat === 'main') addMessageToChat(data);
+                    if (currentChat === 'main') {
+                        addMessageToChat(data);
+                    } else {
+                        // Если сообщение в общем чате, но мы в приватном - игнорируем
+                    }
                     break;
                 case 'private_message':
                     handlePrivateMessage(data);
@@ -919,6 +1019,16 @@ HTML_PAGE = r'''<!DOCTYPE html>
                 case 'system':
                     showSystemMessage(data.message);
                     if (data.users_count) onlineCountSpan.textContent = data.users_count + ' онлайн';
+                    // Если это сообщение о смене имени, обновляем currentUser
+                    if (data.message && data.message.indexOf('Вы успешно сменили имя') !== -1) {
+                        // Парсим новое имя из сообщения (костыль, но работает)
+                        var match = data.message.match(/на (.+)$/);
+                        if (match && match[1]) {
+                            currentUser = match[1];
+                            currentUsernameSpan.textContent = currentUser;
+                            localStorage.setItem('chat_username', currentUser);
+                        }
+                    }
                     break;
                 case 'users_list':
                     updateUsersList(data.users, data.count);
@@ -961,17 +1071,6 @@ HTML_PAGE = r'''<!DOCTYPE html>
                 setTimeout(function() { if (currentUser) connect(currentUser, sessionId); }, 3000);
             };
         }
-        
-        window.changeUsername = function() {
-            var newName = prompt('Введите новое имя (макс. 20 символов):', currentUser);
-            if (newName && newName.trim() && newName.trim() !== currentUser) {
-                currentUser = newName.trim().substring(0, 20);
-                currentUsernameSpan.textContent = currentUser;
-                localStorage.setItem('chat_username', currentUser);
-                if (ws) ws.close();
-                setTimeout(function() { connect(currentUser, sessionId); }, 100);
-            }
-        };
         
         sessionId = getSessionId();
         var saved = localStorage.getItem('chat_username');
