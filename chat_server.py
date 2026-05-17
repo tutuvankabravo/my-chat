@@ -266,7 +266,6 @@ class ChatServer:
             if to_username:
                 await self.send_private_message_parts(username, to_username, text)
 
-        # === ОБРАБОТКА ЗВОНКОВ ===
         elif msg_type == 'call_offer':
             target = data.get('to')
             for client_ws, client_data in self.clients.items():
@@ -480,6 +479,7 @@ HTML_PAGE = r'''<!DOCTYPE html>
             display: flex;
             align-items: center;
             gap: 8px;
+            flex-wrap: wrap;
         }
         .user-item:hover { background: #21262d; }
         .user-item.spam { background: #6e3a3a; opacity: 0.7; }
@@ -491,18 +491,17 @@ HTML_PAGE = r'''<!DOCTYPE html>
         }
         .user-avatar.spam { background: #da3633; }
         .user-name { flex: 1; font-size: 0.85em; }
-        .call-btn {
-            background: #238636;
+        .call-btn, .reject-btn {
             border: none;
             border-radius: 15px;
             padding: 4px 10px;
             cursor: pointer;
-            font-size: 0.75em;
+            font-size: 0.7em;
             color: white;
         }
-        .call-btn.ongoing {
-            background: #da3633;
-        }
+        .call-btn { background: #238636; }
+        .call-btn.ongoing { background: #da3633; }
+        .reject-btn { background: #da3633; margin-left: 5px; }
         .private-badge, .spam-badge {
             font-size: 0.7em;
             padding: 2px 6px;
@@ -701,9 +700,8 @@ HTML_PAGE = r'''<!DOCTYPE html>
         var currentUserFilter = 'all';
         var spamStats = {};
         var spamList = [];
-        
-        // Переменные для звонков
         var activeCalls = new Map();
+        var pendingCalls = new Map();
         
         var messagesContainer = document.getElementById('messagesContainer');
         var messageInput = document.getElementById('messageInput');
@@ -874,50 +872,212 @@ HTML_PAGE = r'''<!DOCTYPE html>
             usersSidebar.classList.remove('show');
         };
         
-        // ========== ФУНКЦИИ ЗВОНКОВ ==========
+        // ========== ЗВОНКИ ==========
         
-        window.startCall = async function(targetUsername) {
-            if (targetUsername === currentUser) {
-                showSystemMessage('Нельзя позвонить самому себе');
-                return;
+        function updateCallButton(username, isCallActive) {
+            var userItems = document.querySelectorAll('.user-item');
+            for (var i = 0; i < userItems.length; i++) {
+                var item = userItems[i];
+                var nameElem = item.querySelector('.user-name');
+                if (nameElem && nameElem.textContent.startsWith(username)) {
+                    var oldCallBtn = item.querySelector('.call-btn');
+                    if (oldCallBtn) oldCallBtn.remove();
+                    var oldRejectBtn = item.querySelector('.reject-btn');
+                    if (oldRejectBtn) oldRejectBtn.remove();
+                    
+                    if (isCallActive) {
+                        var endBtn = document.createElement('button');
+                        endBtn.textContent = '🔴 Положить';
+                        endBtn.className = 'call-btn ongoing';
+                        endBtn.onclick = (function(u) { return function(e) {
+                            e.stopPropagation();
+                            window.endCall(u);
+                        }; })(username);
+                        item.appendChild(endBtn);
+                    } else {
+                        var callBtn = document.createElement('button');
+                        callBtn.textContent = '📞 Звонок';
+                        callBtn.className = 'call-btn';
+                        callBtn.onclick = (function(u) { return function(e) {
+                            e.stopPropagation();
+                            window.startCall(u);
+                        }; })(username);
+                        item.appendChild(callBtn);
+                    }
+                    break;
+                }
             }
+        }
+        
+        function rejectCall(fromUsername) {
+            pendingCalls.delete(fromUsername);
+            ws.send(JSON.stringify({ type: 'call_reject', to: fromUsername }));
+            showSystemMessage('📞 Вы отклонили звонок от ' + fromUsername);
             
-            if (activeCalls.has(targetUsername)) {
-                showSystemMessage('У вас уже есть активный звонок с этим пользователем');
-                return;
+            var userItems = document.querySelectorAll('.user-item');
+            for (var i = 0; i < userItems.length; i++) {
+                var item = userItems[i];
+                var nameElem = item.querySelector('.user-name');
+                if (nameElem && nameElem.textContent.startsWith(fromUsername)) {
+                    var oldCallBtn = item.querySelector('.call-btn');
+                    if (oldCallBtn) oldCallBtn.remove();
+                    var oldRejectBtn = item.querySelector('.reject-btn');
+                    if (oldRejectBtn) oldRejectBtn.remove();
+                    
+                    var callBtn = document.createElement('button');
+                    callBtn.textContent = '📞 Звонок';
+                    callBtn.className = 'call-btn';
+                    callBtn.onclick = (function(u) { return function(e) {
+                        e.stopPropagation();
+                        window.startCall(u);
+                    }; })(fromUsername);
+                    item.appendChild(callBtn);
+                    break;
+                }
+            }
+        }
+        
+        function showIncomingCall(fromUsername, offer) {
+            pendingCalls.set(fromUsername, offer);
+            showSystemMessage('📞 ' + fromUsername + ' звонит вам! Нажмите "Ответить" в списке пользователей');
+            
+            var userItems = document.querySelectorAll('.user-item');
+            for (var i = 0; i < userItems.length; i++) {
+                var item = userItems[i];
+                var nameElem = item.querySelector('.user-name');
+                if (nameElem && nameElem.textContent.startsWith(fromUsername)) {
+                    var oldCallBtn = item.querySelector('.call-btn');
+                    if (oldCallBtn) oldCallBtn.remove();
+                    var oldRejectBtn = item.querySelector('.reject-btn');
+                    if (oldRejectBtn) oldRejectBtn.remove();
+                    
+                    var answerBtn = document.createElement('button');
+                    answerBtn.textContent = '✅ Ответить';
+                    answerBtn.className = 'call-btn';
+                    answerBtn.style.background = '#238636';
+                    answerBtn.onclick = (function(u, o) { return function(e) {
+                        e.stopPropagation();
+                        answerCall(u, o);
+                    }; })(fromUsername, offer);
+                    item.appendChild(answerBtn);
+                    
+                    var rejectBtn = document.createElement('button');
+                    rejectBtn.textContent = '❌ Отклонить';
+                    rejectBtn.className = 'reject-btn';
+                    rejectBtn.onclick = (function(u) { return function(e) {
+                        e.stopPropagation();
+                        rejectCall(u);
+                    }; })(fromUsername);
+                    item.appendChild(rejectBtn);
+                    break;
+                }
+            }
+        }
+        
+        async function answerCall(fromUsername, offer) {
+            var userItems = document.querySelectorAll('.user-item');
+            for (var i = 0; i < userItems.length; i++) {
+                var item = userItems[i];
+                var nameElem = item.querySelector('.user-name');
+                if (nameElem && nameElem.textContent.startsWith(fromUsername)) {
+                    var btn = item.querySelector('.call-btn');
+                    if (btn) btn.remove();
+                    var rbtn = item.querySelector('.reject-btn');
+                    if (rbtn) rbtn.remove();
+                    break;
+                }
             }
             
             try {
-                showSystemMessage('📞 Запрашиваем доступ к микрофону...');
-                const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-                
-                const pc = new RTCPeerConnection({
+                showSystemMessage('📞 Отвечаем ' + fromUsername + '...');
+                var stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                var pc = new RTCPeerConnection({
                     iceServers: [
                         { urls: 'stun:stun.l.google.com:19302' },
                         { urls: 'stun:stun1.l.google.com:19302' }
                     ]
                 });
                 
-                stream.getTracks().forEach(track => pc.addTrack(track, stream));
-                activeCalls.set(targetUsername, { pc, stream });
+                stream.getTracks().forEach(function(track) { pc.addTrack(track, stream); });
+                activeCalls.set(fromUsername, { pc: pc, stream: stream });
                 
-                pc.ontrack = (event) => {
-                    const audio = new Audio();
+                pc.ontrack = function(event) {
+                    var audio = new Audio();
                     audio.srcObject = event.streams[0];
                     audio.autoplay = true;
-                    showSystemMessage(`📞 Разговор с ${targetUsername} начался`);
-                    
-                    // Кнопка завершения звонка в списке пользователей
-                    updateCallButton(targetUsername, true);
+                    showSystemMessage('📞 Разговор с ' + fromUsername + ' начался');
+                    updateCallButton(fromUsername, true);
                 };
                 
-                pc.oniceconnectionstatechange = () => {
+                pc.oniceconnectionstatechange = function() {
                     if (pc.iceConnectionState === 'disconnected' || pc.iceConnectionState === 'failed' || pc.iceConnectionState === 'closed') {
-                        endCall(targetUsername);
+                        window.endCall(fromUsername);
                     }
                 };
                 
-                const offer = await pc.createOffer();
+                await pc.setRemoteDescription(new RTCSessionDescription(offer));
+                var answer = await pc.createAnswer();
+                await pc.setLocalDescription(answer);
+                
+                ws.send(JSON.stringify({
+                    type: 'call_answer',
+                    to: fromUsername,
+                    answer: { sdp: answer.sdp, type: answer.type }
+                }));
+                
+                updateCallButton(fromUsername, true);
+                pendingCalls.delete(fromUsername);
+                
+            } catch (error) {
+                console.error('Ошибка ответа:', error);
+                showSystemMessage('❌ Не удалось ответить на звонок. Проверьте микрофон.');
+                updateCallButton(fromUsername, false);
+                pendingCalls.delete(fromUsername);
+            }
+        }
+        
+        window.startCall = async function(targetUsername) {
+            if (targetUsername === currentUser) {
+                showSystemMessage('Нельзя позвонить самому себе');
+                return;
+            }
+            if (activeCalls.has(targetUsername)) {
+                showSystemMessage('У вас уже есть активный звонок с этим пользователем');
+                return;
+            }
+            if (pendingCalls.has(targetUsername)) {
+                showSystemMessage('Пользователь уже звонит вам');
+                return;
+            }
+            
+            try {
+                showSystemMessage('📞 Запрашиваем доступ к микрофону...');
+                var stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                var pc = new RTCPeerConnection({
+                    iceServers: [
+                        { urls: 'stun:stun.l.google.com:19302' },
+                        { urls: 'stun:stun1.l.google.com:19302' }
+                    ]
+                });
+                
+                stream.getTracks().forEach(function(track) { pc.addTrack(track, stream); });
+                activeCalls.set(targetUsername, { pc: pc, stream: stream });
+                
+                pc.ontrack = function(event) {
+                    var audio = new Audio();
+                    audio.srcObject = event.streams[0];
+                    audio.autoplay = true;
+                    showSystemMessage('📞 Разговор с ' + targetUsername + ' начался');
+                    updateCallButton(targetUsername, true);
+                };
+                
+                pc.oniceconnectionstatechange = function() {
+                    if (pc.iceConnectionState === 'disconnected' || pc.iceConnectionState === 'failed' || pc.iceConnectionState === 'closed') {
+                        window.endCall(targetUsername);
+                    }
+                };
+                
+                var offer = await pc.createOffer();
                 await pc.setLocalDescription(offer);
                 
                 ws.send(JSON.stringify({
@@ -926,7 +1086,7 @@ HTML_PAGE = r'''<!DOCTYPE html>
                     offer: { sdp: offer.sdp, type: offer.type }
                 }));
                 
-                showSystemMessage(`📞 Звоним ${targetUsername}...`);
+                showSystemMessage('📞 Звоним ' + targetUsername + '...');
                 updateCallButton(targetUsername, true);
                 
             } catch (error) {
@@ -940,112 +1100,23 @@ HTML_PAGE = r'''<!DOCTYPE html>
         };
         
         window.endCall = function(targetUsername) {
-            const call = activeCalls.get(targetUsername);
+            var call = activeCalls.get(targetUsername);
             if (call) {
                 if (call.stream) {
-                    call.stream.getTracks().forEach(track => track.stop());
+                    call.stream.getTracks().forEach(function(track) { track.stop(); });
                 }
                 if (call.pc) {
                     call.pc.close();
                 }
                 activeCalls.delete(targetUsername);
             }
-            
-            ws.send(JSON.stringify({
-                type: 'call_end',
-                to: targetUsername
-            }));
-            
-            showSystemMessage(`📞 Звонок с ${targetUsername} завершен`);
+            ws.send(JSON.stringify({ type: 'call_end', to: targetUsername }));
+            showSystemMessage('📞 Звонок с ' + targetUsername + ' завершен');
             updateCallButton(targetUsername, false);
+            pendingCalls.delete(targetUsername);
         };
         
-        async function answerCall(fromUsername, offer) {
-            if (!confirm(`📞 ${fromUsername} звонит вам. Принять звонок?`)) {
-                ws.send(JSON.stringify({
-                    type: 'call_reject',
-                    to: fromUsername
-                }));
-                return;
-            }
-            
-            try {
-                const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-                const pc = new RTCPeerConnection({
-                    iceServers: [
-                        { urls: 'stun:stun.l.google.com:19302' },
-                        { urls: 'stun:stun1.l.google.com:19302' }
-                    ]
-                });
-                
-                stream.getTracks().forEach(track => pc.addTrack(track, stream));
-                activeCalls.set(fromUsername, { pc, stream });
-                
-                pc.ontrack = (event) => {
-                    const audio = new Audio();
-                    audio.srcObject = event.streams[0];
-                    audio.autoplay = true;
-                    showSystemMessage(`📞 Разговор с ${fromUsername} начался`);
-                    updateCallButton(fromUsername, true);
-                };
-                
-                pc.oniceconnectionstatechange = () => {
-                    if (pc.iceConnectionState === 'disconnected' || pc.iceConnectionState === 'failed' || pc.iceConnectionState === 'closed') {
-                        endCall(fromUsername);
-                    }
-                };
-                
-                await pc.setRemoteDescription(new RTCSessionDescription(offer));
-                const answer = await pc.createAnswer();
-                await pc.setLocalDescription(answer);
-                
-                ws.send(JSON.stringify({
-                    type: 'call_answer',
-                    to: fromUsername,
-                    answer: { sdp: answer.sdp, type: answer.type }
-                }));
-                
-                updateCallButton(fromUsername, true);
-                
-            } catch (error) {
-                console.error('Ошибка ответа:', error);
-                showSystemMessage('❌ Не удалось ответить на звонок');
-                updateCallButton(fromUsername, false);
-            }
-        }
-        
-        function updateCallButton(username, isCallActive) {
-            // Обновляем кнопку в списке пользователей
-            const userItems = document.querySelectorAll('.user-item');
-            for (let item of userItems) {
-                const nameElem = item.querySelector('.user-name');
-                if (nameElem && nameElem.textContent.startsWith(username)) {
-                    let callBtn = item.querySelector('.call-btn');
-                    if (!callBtn && isCallActive) {
-                        // Создаем кнопку завершения
-                        callBtn = document.createElement('button');
-                        callBtn.className = 'call-btn ongoing';
-                        callBtn.textContent = '🔴 Положить';
-                        callBtn.onclick = (e) => {
-                            e.stopPropagation();
-                            window.endCall(username);
-                        };
-                        item.appendChild(callBtn);
-                    } else if (callBtn && !isCallActive) {
-                        callBtn.remove();
-                    } else if (callBtn && isCallActive) {
-                        callBtn.textContent = '🔴 Положить';
-                        callBtn.className = 'call-btn ongoing';
-                        callBtn.onclick = (e) => {
-                            e.stopPropagation();
-                            window.endCall(username);
-                        };
-                    }
-                }
-            }
-        }
-        
-        // ========== КОНЕЦ ФУНКЦИЙ ЗВОНКОВ ==========
+        // ========== ОСТАЛЬНЫЕ ФУНКЦИИ ==========
         
         function isSpamUser(username) {
             for (var i = 0; i < spamList.length; i++) {
@@ -1083,7 +1154,6 @@ HTML_PAGE = r'''<!DOCTYPE html>
                 var sessionsHtml = (user.sessions > 1) ? ' (' + user.sessions + ' вкладки)' : '';
                 var spamCount = spamStats[user.name] || 0;
                 var statsHtml = spamCount > 0 ? ' ⚠️' + spamCount : '';
-                var isOnCall = activeCalls.has(user.name);
                 
                 html += '<div class="user-item ' + (isSpam ? 'spam' : '') + '" onclick="' + (isCurrent ? '' : 'startPrivateChat(\'' + escapeHtml(user.name) + '\')') + '">';
                 html += '<div class="user-avatar ' + (isSpam ? 'spam' : '') + '"></div>';
@@ -1091,9 +1161,6 @@ HTML_PAGE = r'''<!DOCTYPE html>
                 
                 if (!isCurrent) {
                     html += '<button class="call-btn" onclick="event.stopPropagation(); startCall(\'' + escapeHtml(user.name) + '\')">📞 Звонок</button>';
-                }
-                
-                if (!isCurrent) {
                     var badgeText = isSpam ? 'Снять спам' : 'Спам';
                     var badgeClass = isSpam ? 'spam-badge' : 'private-badge';
                     html += '<span class="' + badgeClass + '" onclick="event.stopPropagation(); toggleSpam(\'' + escapeHtml(user.name) + '\')">' + badgeText + '</span>';
@@ -1102,9 +1169,10 @@ HTML_PAGE = r'''<!DOCTYPE html>
             }
             usersList.innerHTML = html;
             
-            // Восстанавливаем состояние кнопок звонков
             for (var [username, call] of activeCalls) {
-                updateCallButton(username, true);
+                if (call && call.pc) {
+                    updateCallButton(username, true);
+                }
             }
         }
         
@@ -1226,9 +1294,7 @@ HTML_PAGE = r'''<!DOCTYPE html>
         function handleMessage(data) {
             switch(data.type) {
                 case 'message':
-                    if (currentChat === 'main') {
-                        addMessageToChat(data);
-                    }
+                    if (currentChat === 'main') addMessageToChat(data);
                     break;
                 case 'private_message':
                     handlePrivateMessage(data);
@@ -1259,16 +1325,19 @@ HTML_PAGE = r'''<!DOCTYPE html>
                     spamStats = data.stats || {};
                     filterUsers();
                     break;
-                    
-                // Обработка звонков
                 case 'call_offer':
-                    answerCall(data.from, data.offer);
+                    showIncomingCall(data.from, data.offer);
                     break;
                 case 'call_answer':
                     var call = activeCalls.get(data.from);
                     if (call && call.pc) {
                         call.pc.setRemoteDescription(new RTCSessionDescription(data.answer));
                     }
+                    break;
+                case 'call_reject':
+                    showSystemMessage('📞 ' + data.message);
+                    if (pendingCalls.has(data.from)) pendingCalls.delete(data.from);
+                    updateCallButton(data.from, false);
                     break;
             }
         }
@@ -1321,9 +1390,6 @@ HTML_PAGE = r'''<!DOCTYPE html>
         changeNameBtn.onclick = window.changeUsername;
         toggleUsersBtn.onclick = window.toggleUsers;
         userSearch.onkeyup = filterUsers;
-        
-        // Убрали отправку по Enter, оставили только кнопку
-        // messageInput.onkeydown = ... (удалено)
         
         var filterBtns = document.querySelectorAll('.filter-btn');
         for (var i = 0; i < filterBtns.length; i++) {
