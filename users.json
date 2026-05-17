@@ -16,5 +16,14 @@
     "status": "active",
     "blocked_reason": null,
     "blocked_at": null
+  },
+  "pidoras@gmail.com": {
+    "hash": "6afb02b9d19169bacf401485764748f960f0049ae364ede97e1c438af01e81fb",
+    "salt": "b5c97f75259708fa9322b63fc59706a4a6ec4c6d9e47e13076c2f30b4ad88d8a",
+    "created": "2026-05-17 15:40:06",
+    "name": "pidoras",
+    "status": "active",
+    "blocked_reason": null,
+    "blocked_at": null
   }
 }
