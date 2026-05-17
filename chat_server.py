@@ -1096,12 +1096,7 @@ HTML_PAGE = r'''<!DOCTYPE html>
         toggleUsersBtn.onclick = window.toggleUsers;
         userSearch.onkeyup = filterUsers;
         
-        messageInput.onkeydown = function(e) {
-            if (e.key === 'Enter' && !e.shiftKey) {
-                e.preventDefault();
-                window.sendMessage();
-            }
-        };
+
         
         var filterBtns = document.querySelectorAll('.filter-btn');
         for (var i = 0; i < filterBtns.length; i++) {
