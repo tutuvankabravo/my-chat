@@ -160,7 +160,7 @@ class ChatServer:
         # Имя берётся строго из JSON, игнорируем то, что прислал клиент
         fixed_username = user_auth.get_user_name(email)
         
-        # Проверка уникальности ника (на случай, если в JSON одинаковые имена)
+        # Проверка уникальности ника
         if self.is_nickname_taken(fixed_username):
             fixed_username = self.generate_unique_nickname(fixed_username)
             await ws.send_str(json.dumps({
@@ -370,13 +370,6 @@ class ChatServer:
             if to_username:
                 await self.send_private_message_parts(username, to_username, text)
 
-        elif msg_type == 'typing':
-            await self.broadcast({
-                'type': 'typing',
-                'username': username,
-                'is_typing': data.get('is_typing', False)
-            })
-            
         elif msg_type == 'mark_spam':
             spammer = data.get('spammer')
             if spammer and spammer != username:
@@ -596,6 +589,17 @@ HTML_PAGE = r'''<!DOCTYPE html>
             cursor: pointer;
             font-size: 0.8em;
             min-height: 34px;
+            position: relative;
+        }
+
+        .users-unread-badge {
+            background: #e74c3c;
+            color: white;
+            border-radius: 20px;
+            padding: 2px 6px;
+            font-size: 0.7em;
+            font-weight: bold;
+            margin-left: 6px;
         }
 
         /* Основная область */
@@ -680,7 +684,6 @@ HTML_PAGE = r'''<!DOCTYPE html>
             display: flex;
             align-items: center;
             gap: 8px;
-            cursor: pointer;
             min-height: 44px;
             position: relative;
         }
@@ -708,7 +711,26 @@ HTML_PAGE = r'''<!DOCTYPE html>
             color: white;
         }
 
-        /* Счётчик непрочитанных сообщений */
+        /* Звёздочка */
+        .star-btn {
+            background: none;
+            border: none;
+            font-size: 18px;
+            cursor: pointer;
+            padding: 0 5px;
+            color: #8b949e;
+            transition: color 0.2s;
+        }
+
+        .star-btn.active {
+            color: #f5c518;
+        }
+
+        .star-btn:active {
+            transform: scale(0.9);
+        }
+
+        /* Счётчик непрочитанных */
         .unread-badge {
             background: #e74c3c;
             color: white;
@@ -765,7 +787,6 @@ HTML_PAGE = r'''<!DOCTYPE html>
             font-weight: bold;
         }
 
-        /* Счётчик на вкладке */
         .tab-unread {
             background: #e74c3c;
             color: white;
@@ -841,18 +862,28 @@ HTML_PAGE = r'''<!DOCTYPE html>
             text-align: right;
         }
 
-        /* Индикатор печатания */
-        .typing-indicator {
-            padding: 6px 16px;
-            font-size: 0.75em;
-            color: #8b949e;
-            font-style: italic;
-            min-height: 32px;
-            background: #0d1117;
-            flex-shrink: 0;
+        /* Предупреждение о лимите избранных */
+        .favorite-limit-warning {
+            position: fixed;
+            bottom: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: #e74c3c;
+            color: white;
+            padding: 8px 16px;
+            border-radius: 20px;
+            font-size: 0.8em;
+            z-index: 2000;
+            animation: fadeOut 2s ease forwards;
         }
 
-        /* НИЖНЯЯ ПАНЕЛЬ ВВОДА */
+        @keyframes fadeOut {
+            0% { opacity: 1; }
+            70% { opacity: 1; }
+            100% { opacity: 0; visibility: hidden; }
+        }
+
+        /* Нижняя панель ввода */
         .input-area {
             background: #161b22;
             border-top: 1px solid #30363d;
@@ -861,7 +892,6 @@ HTML_PAGE = r'''<!DOCTYPE html>
             gap: 8px;
             flex-shrink: 0;
             align-items: flex-end;
-            position: relative;
             padding-bottom: max(10px, env(safe-area-inset-bottom));
         }
 
@@ -889,23 +919,6 @@ HTML_PAGE = r'''<!DOCTYPE html>
             cursor: pointer;
             font-weight: bold;
             min-height: 44px;
-            position: relative;
-        }
-
-        /* Общий счётчик непрочитанных над кнопкой */
-        .total-unread {
-            position: absolute;
-            top: -8px;
-            right: -8px;
-            background: #e74c3c;
-            color: white;
-            border-radius: 20px;
-            padding: 2px 6px;
-            font-size: 0.7em;
-            font-weight: bold;
-            min-width: 18px;
-            text-align: center;
-            box-shadow: 0 0 4px rgba(0,0,0,0.3);
         }
 
         @media (max-width: 768px) {
@@ -944,7 +957,7 @@ HTML_PAGE = r'''<!DOCTYPE html>
 
     <!-- Основной чат -->
     <div class="chat-container" id="chatContainer" style="display: none;">
-        <!-- ВЕРХНЯЯ ПАНЕЛЬ -->
+        <!-- Верхняя панель -->
         <div class="chat-header">
             <div class="chat-title">
                 <h1>Защищённый чат</h1>
@@ -952,11 +965,14 @@ HTML_PAGE = r'''<!DOCTYPE html>
             </div>
             <div class="user-info">
                 <span class="username-display" id="currentUsername">Загрузка...</span>
-                <button class="toggle-users-btn" id="toggleUsersBtn">Участники</button>
+                <button class="toggle-users-btn" id="toggleUsersBtn">
+                    Участники
+                    <span id="usersUnreadBadge" class="users-unread-badge" style="display: none;">0</span>
+                </button>
             </div>
         </div>
 
-        <!-- ОСНОВНАЯ ОБЛАСТЬ -->
+        <!-- Основная область -->
         <div class="chat-main">
             <!-- Сайдбар -->
             <div class="users-sidebar" id="usersSidebar">
@@ -978,11 +994,10 @@ HTML_PAGE = r'''<!DOCTYPE html>
                     <button class="chat-tab active" data-chat="main">Общий чат</button>
                 </div>
                 <div class="messages-container" id="messagesContainer"></div>
-                <div class="typing-indicator" id="typingIndicator"></div>
             </div>
         </div>
 
-        <!-- НИЖНЯЯ ПАНЕЛЬ ВВОДА -->
+        <!-- Нижняя панель ввода -->
         <div class="input-area">
             <textarea id="messageInput" class="message-input" placeholder="Введите сообщение..."></textarea>
             <button class="send-btn" id="sendButton">Отправить</button>
@@ -1029,9 +1044,6 @@ HTML_PAGE = r'''<!DOCTYPE html>
         var currentUser = null;
         var currentEmail = null;
         var sessionId = null;
-        var typingTimeout = null;
-        var isTyping = false;
-        var typingUsers = new Set();
         var currentChat = 'main';
         var privateChats = new Map();
         var allUsers = [];
@@ -1040,9 +1052,12 @@ HTML_PAGE = r'''<!DOCTYPE html>
         var spamList = [];
         var blockedUsers = [];
         
-        // Счётчики непрочитанных сообщений
-        var unreadCounts = {}; // { "имя_пользователя": количество }
+        // Счётчики непрочитанных
+        var unreadCounts = {};
         
+        // Избранные
+        var favorites = [];
+        var FAVORITES_KEY = 'chat_favorites';
         
         // DOM элементы
         var authScreen = document.getElementById('authScreen');
@@ -1053,7 +1068,6 @@ HTML_PAGE = r'''<!DOCTYPE html>
         var authError = document.getElementById('authError');
         var messagesContainer = document.getElementById('messagesContainer');
         var messageInput = document.getElementById('messageInput');
-        var typingIndicator = document.getElementById('typingIndicator');
         var currentUsernameSpan = document.getElementById('currentUsername');
         var onlineCountSpan = document.getElementById('onlineCount');
         var usersCountSpan = document.getElementById('usersCount');
@@ -1062,115 +1076,202 @@ HTML_PAGE = r'''<!DOCTYPE html>
         var sendButton = document.getElementById('sendButton');
         var toggleUsersBtn = document.getElementById('toggleUsersBtn');
         var userSearch = document.getElementById('userSearch');
-        var totalUnreadSpan = document.getElementById('totalUnread');
+        var usersUnreadBadge = document.getElementById('usersUnreadBadge');
         
         window.messagesHistory = [];
         
-
+        // === ФУНКЦИИ ДЛЯ СЧЁТЧИКОВ ===
+        function updateTotalUnreadBadge() {
+            var total = 0;
+            for (var user in unreadCounts) {
+                total += unreadCounts[user];
+            }
+            if (total > 0) {
+                usersUnreadBadge.textContent = total > 99 ? '99+' : total;
+                usersUnreadBadge.style.display = 'inline-block';
+            } else {
+                usersUnreadBadge.style.display = 'none';
+            }
+        }
         
         function incrementUnreadCount(fromUser) {
             if (fromUser === currentUser) return;
-            if (currentChat === fromUser) return; // Если чат открыт, не считаем
+            if (currentChat === fromUser) return;
             
             if (!unreadCounts[fromUser]) {
                 unreadCounts[fromUser] = 0;
             }
             unreadCounts[fromUser]++;
             
-            
-            
+            updateTotalUnreadBadge();
             updateUsersListDisplay();
-            updateTabUnread(fromUser);
+            
+            if (favorites.includes(fromUser)) {
+                updateFavoriteTabs();
+            }
         }
         
         function clearUnreadCount(user) {
             if (unreadCounts[user]) {
-                
                 unreadCounts[user] = 0;
-                
+                updateTotalUnreadBadge();
                 updateUsersListDisplay();
-                updateTabUnread(user);
+                updateFavoriteTabs();
             }
         }
         
-        function updateTabUnread(user) {
-            var tabs = document.querySelectorAll('.chat-tab');
-            for (var i = 0; i < tabs.length; i++) {
-                var tab = tabs[i];
-                var tabUser = tab.getAttribute('data-chat');
-                if (tabUser === user) {
-                    // Удаляем старый счётчик
-                    var oldSpan = tab.querySelector('.tab-unread');
-                    if (oldSpan) oldSpan.remove();
-                    
-                    // Добавляем новый если есть
-                    var count = unreadCounts[user] || 0;
-                    if (count > 0) {
+        // === ФУНКЦИИ ДЛЯ ИЗБРАННЫХ ===
+        function loadFavorites() {
+            var saved = localStorage.getItem(FAVORITES_KEY);
+            if (saved) {
+                try {
+                    favorites = JSON.parse(saved);
+                    if (!Array.isArray(favorites)) favorites = [];
+                } catch(e) { favorites = []; }
+            }
+            if (favorites.length > 3) favorites = favorites.slice(0, 3);
+        }
+        
+        function saveFavorites() {
+            localStorage.setItem(FAVORITES_KEY, JSON.stringify(favorites));
+        }
+        
+        function addToFavorites(username) {
+            if (favorites.includes(username)) {
+                showSystemMessage(`⚠️ ${username} уже в избранном`);
+                return false;
+            }
+            if (favorites.length >= 3) {
+                showSystemMessage('⚠️ Можно добавить не более 3 избранных контактов');
+                showFavoriteLimitWarning();
+                return false;
+            }
+            favorites.push(username);
+            saveFavorites();
+            showSystemMessage(`⭐ ${username} добавлен(а) в избранное`);
+            
+            if (unreadCounts[username] > 0) {
+                addFavoriteTab(username);
+            }
+            
+            updateStarButtons();
+            return true;
+        }
+        
+        function removeFromFavorites(username) {
+            var index = favorites.indexOf(username);
+            if (index !== -1) {
+                favorites.splice(index, 1);
+                saveFavorites();
+                showSystemMessage(`☆ ${username} удалён(а) из избранного`);
+                closeFavoriteTab(username);
+                updateStarButtons();
+            }
+        }
+        
+        function toggleFavorite(username) {
+            if (username === currentUser) return;
+            if (favorites.includes(username)) {
+                removeFromFavorites(username);
+            } else {
+                addToFavorites(username);
+            }
+        }
+        
+        function updateStarButtons() {
+            var allStars = document.querySelectorAll('.star-btn');
+            for (var i = 0; i < allStars.length; i++) {
+                var btn = allStars[i];
+                var user = btn.getAttribute('data-user');
+                if (favorites.includes(user)) {
+                    btn.textContent = '★';
+                    btn.classList.add('active');
+                } else {
+                    btn.textContent = '☆';
+                    btn.classList.remove('active');
+                }
+            }
+        }
+        
+        function addFavoriteTab(username) {
+            var tabsContainer = document.getElementById('chatTabs');
+            
+            var existing = document.querySelector(`.chat-tab[data-chat="${username}"]`);
+            if (existing) return;
+            
+            var tab = document.createElement('button');
+            tab.className = 'chat-tab private favorite-tab';
+            tab.setAttribute('data-chat', username);
+            tab.innerHTML = username;
+            
+            var count = unreadCounts[username] || 0;
+            if (count > 0) {
+                var span = document.createElement('span');
+                span.className = 'tab-unread';
+                span.textContent = count > 99 ? '99+' : count;
+                tab.appendChild(span);
+            }
+            
+            var closeSpan = document.createElement('span');
+            closeSpan.className = 'close-tab';
+            closeSpan.textContent = '✖';
+            closeSpan.onclick = function(e) {
+                e.stopPropagation();
+                closeFavoriteTab(username);
+            };
+            tab.appendChild(closeSpan);
+            
+            tab.onclick = function() {
+                window.switchChat(username);
+            };
+            
+            tabsContainer.appendChild(tab);
+        }
+        
+        function closeFavoriteTab(username) {
+            var tab = document.querySelector(`.chat-tab[data-chat="${username}"]`);
+            if (tab) {
+                if (currentChat === username) {
+                    window.switchChat('main');
+                }
+                tab.remove();
+            }
+        }
+        
+        function updateFavoriteTabs() {
+            for (var i = 0; i < favorites.length; i++) {
+                var fav = favorites[i];
+                var count = unreadCounts[fav] || 0;
+                
+                var tab = document.querySelector(`.chat-tab[data-chat="${fav}"]`);
+                if (count > 0) {
+                    if (!tab) {
+                        addFavoriteTab(fav);
+                    } else {
+                        var oldSpan = tab.querySelector('.tab-unread');
+                        if (oldSpan) oldSpan.remove();
                         var span = document.createElement('span');
                         span.className = 'tab-unread';
                         span.textContent = count > 99 ? '99+' : count;
                         tab.appendChild(span);
                     }
-                    break;
+                } else {
+                    if (tab) {
+                        var oldSpan = tab.querySelector('.tab-unread');
+                        if (oldSpan) oldSpan.remove();
+                    }
                 }
             }
         }
         
-        function updateUsersListDisplay() {
-            // Обновляем отображение списка пользователей с учётом счётчиков
-            var searchValue = userSearch.value.toLowerCase();
-            var filtered = [];
-            for (var i = 0; i < allUsers.length; i++) {
-                var user = allUsers[i];
-                if (searchValue && user.name.toLowerCase().indexOf(searchValue) === -1) continue;
-                if (currentUserFilter === 'spam' && !isSpamUser(user.name)) continue;
-                if (currentUserFilter === 'clean' && isSpamUser(user.name)) continue;
-                filtered.push(user);
-            }
-            filtered.sort(function(a, b) {
-                if (a.name === currentUser) return -1;
-                if (b.name === currentUser) return 1;
-                if (a.name < b.name) return -1;
-                if (a.name > b.name) return 1;
-                return 0;
-            });
-            
-            if (filtered.length === 0) {
-                usersList.innerHTML = '<div style="padding:10px;text-align:center;">Пользователи не найдены</div>';
-                return;
-            }
-            
-            var html = '';
-            for (var i = 0; i < filtered.length; i++) {
-                var user = filtered[i];
-                var isCurrent = (user.name === currentUser);
-                var isSpam = isSpamUser(user.name);
-                var isBlocked = isBlockedUser(user.name);
-                var sessionsHtml = (user.sessions > 1) ? ' (' + user.sessions + ' вкладки)' : '';
-                var spamCount = spamStats[user.name] || 0;
-                var statsHtml = spamCount > 0 ? ' ⚠️' + spamCount : '';
-                var unreadCount = unreadCounts[user.name] || 0;
-                var unreadHtml = (unreadCount > 0 && !isCurrent) ? '<span class="unread-badge">' + (unreadCount > 99 ? '99+' : unreadCount) + '</span>' : '';
-                
-                var onClick = (isCurrent || isBlocked) ? '' : ' onclick="startPrivateChat(\'' + escapeHtml(user.name) + '\')"';
-                var onSpam = !isCurrent && !isBlocked ? ' onclick="event.stopPropagation(); toggleSpam(\'' + escapeHtml(user.name) + '\')"' : '';
-                var badgeText = isSpam ? 'Снять спам' : 'Спам';
-                var badgeClass = isSpam ? 'spam-badge' : 'private-badge';
-                var blockedHtml = isBlocked ? '<span class="blocked-badge">🔒 Заблокирован</span>' : '';
-                
-                var userClass = 'user-item';
-                if (isSpam) userClass += ' spam';
-                if (isBlocked) userClass += ' blocked';
-                
-                html += '<div class="' + userClass + '"' + onClick + '>';
-                html += '<div class="user-avatar ' + (isSpam ? 'spam' : '') + (isBlocked ? ' blocked' : '') + '"></div>';
-                html += '<div class="user-name">' + escapeHtml(user.name) + (isCurrent ? ' (Вы)' : '') + sessionsHtml + statsHtml + '</div>';
-                html += unreadHtml;
-                if (!isCurrent && !isBlocked) html += '<span class="' + badgeClass + '"' + onSpam + '>' + badgeText + '</span>';
-                if (isBlocked) html += blockedHtml;
-                html += '</div>';
-            }
-            usersList.innerHTML = html;
+        function showFavoriteLimitWarning() {
+            var warning = document.createElement('div');
+            warning.className = 'favorite-limit-warning';
+            warning.textContent = '⚠️ Нельзя добавить более 3 избранных контактов';
+            document.body.appendChild(warning);
+            setTimeout(function() {
+                if (warning) warning.remove();
+            }, 2000);
         }
         
         // === ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ===
@@ -1232,81 +1333,7 @@ HTML_PAGE = r'''<!DOCTYPE html>
             scrollToBottom();
         }
         
-        function showNotification(username) {
-            var tabs = document.getElementById('chatTabs');
-            var tab = null;
-            for (var i = 0; i < tabs.children.length; i++) {
-                if (tabs.children[i].getAttribute('data-chat') === username) {
-                    tab = tabs.children[i];
-                    break;
-                }
-            }
-            if (tab && currentChat !== username) {
-                tab.style.background = '#ff9800';
-                setTimeout(function() {
-                    if (currentChat !== username) tab.style.background = '';
-                }, 1000);
-            }
-        }
-        
-        function addPrivateChatTab(username) {
-            var tabsContainer = document.getElementById('chatTabs');
-            var existing = null;
-            for (var i = 0; i < tabsContainer.children.length; i++) {
-                if (tabsContainer.children[i].getAttribute('data-chat') === username) {
-                    existing = tabsContainer.children[i];
-                    break;
-                }
-            }
-            if (existing) return;
-            
-            var tab = document.createElement('button');
-            tab.className = 'chat-tab private';
-            tab.setAttribute('data-chat', username);
-            tab.innerHTML = username;
-            
-            // Добавляем счётчик если есть
-            var count = unreadCounts[username] || 0;
-            if (count > 0) {
-                var span = document.createElement('span');
-                span.className = 'tab-unread';
-                span.textContent = count > 99 ? '99+' : count;
-                tab.appendChild(span);
-            }
-            
-            tab.onclick = function(e) {
-                if (e.target.className !== 'close-tab') window.switchChat(username);
-            };
-            
-            // Добавляем крестик
-            var closeSpan = document.createElement('span');
-            closeSpan.className = 'close-tab';
-            closeSpan.textContent = '✖';
-            closeSpan.onclick = function(e) {
-                e.stopPropagation();
-                window.closePrivateChat(username);
-            };
-            tab.appendChild(closeSpan);
-            
-            tabsContainer.appendChild(tab);
-        }
-        
-        window.closePrivateChat = function(username) {
-            privateChats.delete(username);
-            var tabsContainer = document.getElementById('chatTabs');
-            var tabToRemove = null;
-            for (var i = 0; i < tabsContainer.children.length; i++) {
-                if (tabsContainer.children[i].getAttribute('data-chat') === username) {
-                    tabToRemove = tabsContainer.children[i];
-                    break;
-                }
-            }
-            if (tabToRemove) tabToRemove.remove();
-            if (currentChat === username) window.switchChat('main');
-        };
-        
         window.switchChat = function(chatId) {
-            // Если переключаемся на приватный чат - сбрасываем счётчик
             if (chatId !== 'main') {
                 clearUnreadCount(chatId);
             }
@@ -1318,8 +1345,6 @@ HTML_PAGE = r'''<!DOCTYPE html>
                 var tabChat = tab.getAttribute('data-chat');
                 if ((chatId === 'main' && tabChat === 'main') || (chatId !== 'main' && tabChat === chatId)) {
                     tab.classList.add('active');
-                    // Сбрасываем фон уведомления
-                    tab.style.background = '';
                 } else {
                     tab.classList.remove('active');
                 }
@@ -1350,7 +1375,9 @@ HTML_PAGE = r'''<!DOCTYPE html>
             }
             if (!privateChats.has(username)) {
                 privateChats.set(username, []);
-                addPrivateChatTab(username);
+                if (favorites.includes(username)) {
+                    addFavoriteTab(username);
+                }
             }
             window.switchChat(username);
             usersSidebar.classList.remove('show');
@@ -1370,25 +1397,64 @@ HTML_PAGE = r'''<!DOCTYPE html>
             return false;
         }
         
-        window.setUserFilter = function(filter) {
-            currentUserFilter = filter;
-            var btns = document.querySelectorAll('.filter-btn');
-            for (var i = 0; i < btns.length; i++) {
-                var btn = btns[i];
-                btn.classList.remove('active');
-                if (btn.getAttribute('data-filter') === filter) btn.classList.add('active');
+        function updateUsersListDisplay() {
+            var searchValue = userSearch.value.toLowerCase();
+            var filtered = [];
+            for (var i = 0; i < allUsers.length; i++) {
+                var user = allUsers[i];
+                if (searchValue && user.name.toLowerCase().indexOf(searchValue) === -1) continue;
+                if (currentUserFilter === 'spam' && !isSpamUser(user.name)) continue;
+                if (currentUserFilter === 'clean' && isSpamUser(user.name)) continue;
+                filtered.push(user);
             }
-            updateUsersListDisplay();
-        };
-        
-        window.toggleUsers = function() {
-            if (usersSidebar.classList.contains('show')) {
-                usersSidebar.classList.remove('show');
-            } else {
-                usersSidebar.classList.add('show');
-                updateUsersListDisplay();
+            filtered.sort(function(a, b) {
+                if (a.name === currentUser) return -1;
+                if (b.name === currentUser) return 1;
+                if (a.name < b.name) return -1;
+                if (a.name > b.name) return 1;
+                return 0;
+            });
+            
+            if (filtered.length === 0) {
+                usersList.innerHTML = '<div style="padding:10px;text-align:center;">Пользователи не найдены</div>';
+                return;
             }
-        };
+            
+            var html = '';
+            for (var i = 0; i < filtered.length; i++) {
+                var user = filtered[i];
+                var isCurrent = (user.name === currentUser);
+                var isSpam = isSpamUser(user.name);
+                var isBlocked = isBlockedUser(user.name);
+                var sessionsHtml = (user.sessions > 1) ? ' (' + user.sessions + ' вкладки)' : '';
+                var spamCount = spamStats[user.name] || 0;
+                var statsHtml = spamCount > 0 ? ' ⚠️' + spamCount : '';
+                var unreadCount = unreadCounts[user.name] || 0;
+                var unreadHtml = (unreadCount > 0 && !isCurrent) ? '<span class="unread-badge">' + (unreadCount > 99 ? '99+' : unreadCount) + '</span>' : '';
+                var isFavorite = favorites.includes(user.name);
+                var starHtml = !isCurrent && !isBlocked ? 
+                    '<button class="star-btn ' + (isFavorite ? 'active' : '') + '" data-user="' + escapeHtml(user.name) + '" onclick="event.stopPropagation(); toggleFavorite(\'' + escapeHtml(user.name) + '\')">' + (isFavorite ? '★' : '☆') + '</button>' : '';
+                var blockedHtml = isBlocked ? '<span class="blocked-badge">🔒 Заблокирован</span>' : '';
+                var onSpam = !isCurrent && !isBlocked ? ' onclick="event.stopPropagation(); toggleSpam(\'' + escapeHtml(user.name) + '\')"' : '';
+                var badgeText = isSpam ? 'Снять спам' : 'Спам';
+                var badgeClass = isSpam ? 'spam-badge' : 'private-badge';
+                
+                var userClass = 'user-item';
+                if (isSpam) userClass += ' spam';
+                if (isBlocked) userClass += ' blocked';
+                
+                html += '<div class="' + userClass + '" onclick="startPrivateChat(\'' + escapeHtml(user.name) + '\')">';
+                html += '<div class="user-avatar ' + (isSpam ? 'spam' : '') + (isBlocked ? ' blocked' : '') + '"></div>';
+                html += '<div class="user-name">' + escapeHtml(user.name) + (isCurrent ? ' (Вы)' : '') + sessionsHtml + statsHtml + '</div>';
+                html += unreadHtml;
+                html += starHtml;
+                if (!isCurrent && !isBlocked) html += '<span class="' + badgeClass + '"' + onSpam + '>' + badgeText + '</span>';
+                if (isBlocked) html += blockedHtml;
+                html += '</div>';
+            }
+            usersList.innerHTML = html;
+            updateStarButtons();
+        }
         
         window.toggleSpam = function(username) {
             if (isSpamUser(username)) {
@@ -1411,6 +1477,26 @@ HTML_PAGE = r'''<!DOCTYPE html>
             updateUsersListDisplay();
         };
         
+        window.setUserFilter = function(filter) {
+            currentUserFilter = filter;
+            var btns = document.querySelectorAll('.filter-btn');
+            for (var i = 0; i < btns.length; i++) {
+                var btn = btns[i];
+                btn.classList.remove('active');
+                if (btn.getAttribute('data-filter') === filter) btn.classList.add('active');
+            }
+            updateUsersListDisplay();
+        };
+        
+        window.toggleUsers = function() {
+            if (usersSidebar.classList.contains('show')) {
+                usersSidebar.classList.remove('show');
+            } else {
+                usersSidebar.classList.add('show');
+                updateUsersListDisplay();
+            }
+        };
+        
         window.sendMessage = function() {
             var text = messageInput.value;
             if (!text.trim() || !ws || ws.readyState !== WebSocket.OPEN) return;
@@ -1420,31 +1506,9 @@ HTML_PAGE = r'''<!DOCTYPE html>
                 ws.send(JSON.stringify({ type: 'private_message', to: currentChat, text: text }));
             }
             messageInput.value = '';
-            if (isTyping) {
-                ws.send(JSON.stringify({ type: 'typing', is_typing: false }));
-                isTyping = false;
-            }
-            // Сбрасываем высоту
             messageInput.style.height = 'auto';
             setTimeout(scrollToBottom, 10);
         };
-        
-        function updateTypingIndicator(username, isTypingUser) {
-            if (currentChat !== 'main') return;
-            if (isTypingUser && username !== currentUser) typingUsers.add(username);
-            else typingUsers.delete(username);
-            if (typingUsers.size > 0) {
-                var names = [];
-                typingUsers.forEach(function(name) { names.push(name); });
-                var text = '';
-                if (names.length === 1) text = names[0] + ' печатает...';
-                else if (names.length === 2) text = names[0] + ' и ' + names[1] + ' печатают...';
-                else text = names.length + ' человек печатают...';
-                typingIndicator.textContent = text;
-            } else {
-                typingIndicator.textContent = '';
-            }
-        }
         
         function handlePrivateMessage(message) {
             var isFromMe = (message.from === currentUser);
@@ -1454,25 +1518,22 @@ HTML_PAGE = r'''<!DOCTYPE html>
                 if (spamList[i] === message.from) isSpam = true;
             }
             
-            if (!isFromMe && isBlockedUser(message.from)) {
-                return;
-            }
+            if (!isFromMe && isBlockedUser(message.from)) return;
             if (!isFromMe && isSpam) return;
             
-            // Увеличиваем счётчик непрочитанных, если не от себя и не текущий чат
             if (!isFromMe && currentChat !== message.from) {
                 incrementUnreadCount(message.from);
             }
             
             if (!privateChats.has(otherUser)) {
                 privateChats.set(otherUser, []);
-                addPrivateChatTab(otherUser);
+                if (favorites.includes(otherUser)) {
+                    addFavoriteTab(otherUser);
+                }
             }
             privateChats.get(otherUser).push(message);
             if (currentChat === otherUser) {
                 addPrivateMessageToChat(message, otherUser);
-            } else if (!isFromMe) {
-                showNotification(otherUser);
             }
         }
         
@@ -1501,9 +1562,6 @@ HTML_PAGE = r'''<!DOCTYPE html>
                     break;
                 case 'users_list':
                     updateUsersList(data.users, data.count);
-                    break;
-                case 'typing':
-                    updateTypingIndicator(data.username, data.is_typing);
                     break;
                 case 'spam_list':
                     spamList = data.spammers || [];
@@ -1615,46 +1673,22 @@ HTML_PAGE = r'''<!DOCTYPE html>
         toggleUsersBtn.onclick = window.toggleUsers;
         userSearch.onkeyup = function() { updateUsersListDisplay(); };
         
-        // Поведение клавиши Enter в textarea
         messageInput.addEventListener('keydown', function(e) {
             if (e.key === 'Enter') {
                 if (isMobile) {
-                    // На мобильных - новая строка (ничего не делаем, стандартное поведение)
                     return;
                 } else {
-                    // На десктопе: если без Shift - отправка
                     if (!e.shiftKey) {
                         e.preventDefault();
                         window.sendMessage();
                     }
-                    // С Shift - новая строка (стандартное поведение)
                 }
             }
         });
         
-        // Автоматическое изменение высоты textarea
         messageInput.addEventListener('input', function() {
             this.style.height = 'auto';
             this.style.height = Math.min(this.scrollHeight, 120) + 'px';
-        });
-        
-        // Индикатор печатания
-        messageInput.addEventListener('input', function() {
-            if (!isTyping) {
-                isTyping = true;
-                if (ws && ws.readyState === WebSocket.OPEN) {
-                    ws.send(JSON.stringify({ type: 'typing', is_typing: true }));
-                }
-            }
-            clearTimeout(typingTimeout);
-            typingTimeout = setTimeout(function() {
-                if (isTyping) {
-                    isTyping = false;
-                    if (ws && ws.readyState === WebSocket.OPEN) {
-                        ws.send(JSON.stringify({ type: 'typing', is_typing: false }));
-                    }
-                }
-            }, 1000);
         });
         
         var filterBtns = document.querySelectorAll('.filter-btn');
@@ -1668,6 +1702,9 @@ HTML_PAGE = r'''<!DOCTYPE html>
         if (mainTab) {
             mainTab.onclick = function() { window.switchChat('main'); };
         }
+        
+        // Инициализация избранных
+        loadFavorites();
         
         window.addMessageToChat = addMessageToChat;
     </script>
@@ -1776,7 +1813,6 @@ if __name__ == "__main__":
     print(f"🚀 Сервер запущен на порту {PORT}")
     print(f"📧 Авторизация через email и пароль")
     print(f"📁 Файл пользователей: {USERS_FILE}")
-    print(f"🔒 Блокировка пользователей поддерживается")
-    print(f"👤 Имена пользователей фиксированы (берутся из JSON)")
-    print(f"📱 На мобильных Enter - новая строка, кнопка - отправка")
+    print(f"🔒 Поддерживается блокировка пользователей")
+    print(f"⭐ Можно добавить до 3 избранных контактов")
     web.run_app(app, host='0.0.0.0', port=PORT)
