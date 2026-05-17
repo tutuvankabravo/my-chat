@@ -268,7 +268,6 @@ class ChatServer:
 
         elif msg_type == 'call_offer':
             target = data.get('to')
-            # Проверяем, не в черном ли списке звонящий
             if target in self.spam_filters and username in self.spam_filters[target]:
                 await ws.send_str(json.dumps({
                     'type': 'system',
@@ -281,7 +280,8 @@ class ChatServer:
                     await client_ws.send_str(json.dumps({
                         'type': 'call_offer',
                         'from': username,
-                        'offer': data.get('offer')
+                        'offer': data.get('offer'),
+                        'mode': data.get('mode', 'talk')
                     }))
                     break
 
@@ -292,7 +292,8 @@ class ChatServer:
                     await client_ws.send_str(json.dumps({
                         'type': 'call_answer',
                         'from': username,
-                        'answer': data.get('answer')
+                        'answer': data.get('answer'),
+                        'mode': data.get('mode', 'talk')
                     }))
                     break
 
@@ -394,7 +395,7 @@ HTML_PAGE = r'''<!DOCTYPE html>
         }
         .input-area {
             background: #161b22;
-            border-bottom: 1px solid #30363d;
+            border-top: 1px solid #30363d;
             padding: 10px 12px;
             display: flex;
             gap: 8px;
@@ -499,26 +500,6 @@ HTML_PAGE = r'''<!DOCTYPE html>
         }
         .user-avatar.spam { background: #da3633; }
         .user-name { flex: 1; font-size: 0.85em; }
-        .call-btn {
-            border: none;
-            border-radius: 15px;
-            padding: 4px 10px;
-            cursor: pointer;
-            font-size: 0.7em;
-            color: white;
-            background: #238636;
-        }
-        .call-btn.ongoing { background: #da3633; }
-        .reject-btn {
-            border: none;
-            border-radius: 15px;
-            padding: 4px 10px;
-            cursor: pointer;
-            font-size: 0.7em;
-            color: white;
-            background: #da3633;
-            margin-left: 5px;
-        }
         .private-badge, .spam-badge {
             font-size: 0.7em;
             padding: 2px 6px;
@@ -541,6 +522,7 @@ HTML_PAGE = r'''<!DOCTYPE html>
             padding: 5px 10px;
             overflow-x: auto;
             flex-shrink: 0;
+            align-items: center;
         }
         .chat-tab {
             padding: 6px 12px;
@@ -560,11 +542,6 @@ HTML_PAGE = r'''<!DOCTYPE html>
             cursor: pointer;
             font-weight: bold;
         }
-        .chat-header-info {
-            display: flex;
-            align-items: center;
-            gap: 10px;
-        }
         .chat-call-btn {
             background: #238636;
             border: none;
@@ -573,6 +550,7 @@ HTML_PAGE = r'''<!DOCTYPE html>
             border-radius: 20px;
             cursor: pointer;
             font-size: 0.8em;
+            margin-left: 5px;
         }
         .chat-call-btn.ongoing {
             background: #da3633;
@@ -580,6 +558,15 @@ HTML_PAGE = r'''<!DOCTYPE html>
         .chat-call-btn:disabled {
             opacity: 0.5;
             cursor: not-allowed;
+        }
+        #callModeSelect {
+            background: #21262d;
+            border: 1px solid #30363d;
+            color: #f0f6fc;
+            padding: 5px 8px;
+            border-radius: 20px;
+            font-size: 0.8em;
+            cursor: pointer;
         }
         .messages-container {
             flex: 1;
@@ -688,10 +675,6 @@ HTML_PAGE = r'''<!DOCTYPE html>
 </head>
 <body>
     <div class="chat-container">
-        <div class="input-area">
-            <textarea id="messageInput" class="message-input" placeholder="Введите сообщение..."></textarea>
-            <button class="send-btn" id="sendButton">Отправить</button>
-        </div>
         <div class="chat-header">
             <div class="chat-title">
                 <h1>Веб-чат</h1>
@@ -724,6 +707,10 @@ HTML_PAGE = r'''<!DOCTYPE html>
                 <div class="typing-indicator" id="typingIndicator"></div>
             </div>
         </div>
+        <div class="input-area">
+            <textarea id="messageInput" class="message-input" placeholder="Введите сообщение..."></textarea>
+            <button class="send-btn" id="sendButton">Отправить</button>
+        </div>
     </div>
     <script>
         var ws = null;
@@ -740,6 +727,7 @@ HTML_PAGE = r'''<!DOCTYPE html>
         var spamList = [];
         var activeCalls = new Map();
         var pendingCalls = new Map();
+        var audioElements = new Map();
         
         var messagesContainer = document.getElementById('messagesContainer');
         var messageInput = document.getElementById('messageInput');
@@ -813,48 +801,386 @@ HTML_PAGE = r'''<!DOCTYPE html>
             scrollToBottom();
         }
         
-        function updateChatHeaderCallButton() {
-            var chatHeader = document.querySelector('.chat-tabs');
-            if (!chatHeader) return;
+        function showCallButtonWithMode(username) {
+            var headerDiv = document.querySelector('.chat-tabs');
             
-            // Удаляем старую кнопку если есть
             var oldBtn = document.getElementById('chatCallBtn');
+            var oldReject = document.getElementById('chatRejectBtn');
+            var oldMode = document.getElementById('callModeSelect');
+            var oldListen = document.getElementById('chatListenBtn');
             if (oldBtn) oldBtn.remove();
+            if (oldReject) oldReject.remove();
+            if (oldMode) oldMode.remove();
+            if (oldListen) oldListen.remove();
             
-            if (currentChat !== 'main') {
-                var headerDiv = document.querySelector('.chat-tabs');
-                var callBtn = document.createElement('button');
-                callBtn.id = 'chatCallBtn';
-                var isCallActive = activeCalls.has(currentChat);
-                callBtn.textContent = isCallActive ? '🔴 Положить трубку' : '📞 Позвонить';
-                callBtn.className = 'chat-call-btn' + (isCallActive ? ' ongoing' : '');
-                callBtn.onclick = function() {
+            var select = document.createElement('select');
+            select.id = 'callModeSelect';
+            select.className = 'chat-call-btn';
+            select.style.background = '#21262d';
+            select.style.marginRight = '5px';
+            select.innerHTML = '<option value="talk">🎤 Говорить и слушать</option><option value="listen">👂 Только слушать</option>';
+            select.onclick = function(e) { e.stopPropagation(); };
+            
+            var callBtn = document.createElement('button');
+            callBtn.id = 'chatCallBtn';
+            callBtn.textContent = '📞 Позвонить';
+            callBtn.className = 'chat-call-btn';
+            callBtn.style.background = '#238636';
+            callBtn.onclick = function() {
+                var mode = document.getElementById('callModeSelect').value;
+                window.startCall(username, mode);
+            };
+            
+            headerDiv.appendChild(select);
+            headerDiv.appendChild(callBtn);
+        }
+        
+        function updateCallButton(username, isCallActive, isReceiveOnly) {
+            if (currentChat === username) {
+                var callBtn = document.getElementById('chatCallBtn');
+                var rejectBtn = document.getElementById('chatRejectBtn');
+                var modeSelect = document.getElementById('callModeSelect');
+                var listenBtn = document.getElementById('chatListenBtn');
+                
+                if (rejectBtn) rejectBtn.remove();
+                if (modeSelect) modeSelect.remove();
+                if (listenBtn) listenBtn.remove();
+                
+                if (callBtn) {
                     if (isCallActive) {
-                        window.endCall(currentChat);
-                    } else {
-                        window.startCall(currentChat);
+                        callBtn.textContent = isReceiveOnly ? '🎧 Завершить прослушивание' : '🔴 Положить трубку';
+                        callBtn.className = 'chat-call-btn ongoing';
+                        callBtn.style.background = '#da3633';
+                        var newBtn = callBtn.cloneNode(true);
+                        callBtn.parentNode.replaceChild(newBtn, callBtn);
+                        newBtn.id = 'chatCallBtn';
+                        newBtn.onclick = function() { window.endCall(username); };
                     }
-                };
-                headerDiv.appendChild(callBtn);
+                }
             }
         }
         
-        function showNotification(username) {
-            var tabs = document.getElementById('chatTabs');
-            var tab = null;
-            for (var i = 0; i < tabs.children.length; i++) {
-                if (tabs.children[i].getAttribute('data-chat') === username) {
-                    tab = tabs.children[i];
-                    break;
-                }
-            }
-            if (tab && currentChat !== username) {
-                tab.style.background = '#ff9800';
-                setTimeout(function() {
-                    if (currentChat !== username) tab.style.background = '';
-                }, 1000);
+        function rejectCall(fromUsername) {
+            if (pendingCalls.has(fromUsername)) {
+                pendingCalls.delete(fromUsername);
+                ws.send(JSON.stringify({ type: 'call_reject', to: fromUsername }));
+                showSystemMessage('📞 Вы отклонили звонок от ' + fromUsername);
+                
+                var rejectBtn = document.getElementById('chatRejectBtn');
+                if (rejectBtn) rejectBtn.remove();
+                
+                showCallButtonWithMode(fromUsername);
             }
         }
+        
+        function showIncomingCall(fromUsername, offer, mode) {
+            var isSpam = false;
+            for (var i = 0; i < spamList.length; i++) {
+                if (spamList[i] === fromUsername) isSpam = true;
+            }
+            if (isSpam) {
+                ws.send(JSON.stringify({ type: 'call_reject', to: fromUsername }));
+                return;
+            }
+            
+            if (activeCalls.has(fromUsername)) {
+                return;
+            }
+            
+            pendingCalls.set(fromUsername, { offer: offer, mode: mode });
+            showSystemMessage('📞 ' + fromUsername + ' звонит вам! Открываем чат...');
+            
+            if (!privateChats.has(fromUsername)) {
+                privateChats.set(fromUsername, []);
+                addPrivateChatTab(fromUsername);
+            }
+            window.switchChat(fromUsername);
+            
+            var oldCallBtn = document.getElementById('chatCallBtn');
+            var oldRejectBtn = document.getElementById('chatRejectBtn');
+            var oldMode = document.getElementById('callModeSelect');
+            var oldListen = document.getElementById('chatListenBtn');
+            if (oldCallBtn) oldCallBtn.remove();
+            if (oldRejectBtn) oldRejectBtn.remove();
+            if (oldMode) oldMode.remove();
+            if (oldListen) oldListen.remove();
+            
+            var headerDiv = document.querySelector('.chat-tabs');
+            
+            var answerTalkBtn = document.createElement('button');
+            answerTalkBtn.id = 'chatCallBtn';
+            answerTalkBtn.textContent = '🎤 Ответить (с микрофоном)';
+            answerTalkBtn.className = 'chat-call-btn';
+            answerTalkBtn.style.background = '#238636';
+            answerTalkBtn.style.marginRight = '5px';
+            answerTalkBtn.onclick = function() { answerCall(fromUsername, offer, 'talk'); };
+            
+            var answerListenBtn = document.createElement('button');
+            answerListenBtn.id = 'chatListenBtn';
+            answerListenBtn.textContent = '👂 Ответить (только слушать)';
+            answerListenBtn.className = 'chat-call-btn';
+            answerListenBtn.style.background = '#1a5d8c';
+            answerListenBtn.style.marginRight = '5px';
+            answerListenBtn.onclick = function() { answerCall(fromUsername, offer, 'listen'); };
+            
+            var rejectBtn = document.createElement('button');
+            rejectBtn.id = 'chatRejectBtn';
+            rejectBtn.textContent = '❌ Отклонить';
+            rejectBtn.className = 'chat-call-btn';
+            rejectBtn.style.background = '#da3633';
+            rejectBtn.onclick = function() { rejectCall(fromUsername); };
+            
+            headerDiv.appendChild(answerTalkBtn);
+            headerDiv.appendChild(answerListenBtn);
+            headerDiv.appendChild(rejectBtn);
+        }
+        
+        async function answerCall(fromUsername, offer, mode) {
+            var rejectBtn = document.getElementById('chatRejectBtn');
+            var listenBtn = document.getElementById('chatListenBtn');
+            var talkBtn = document.getElementById('chatCallBtn');
+            if (rejectBtn) rejectBtn.remove();
+            if (listenBtn) listenBtn.remove();
+            if (talkBtn) talkBtn.remove();
+            
+            var statusBtn = document.createElement('button');
+            statusBtn.id = 'chatCallBtn';
+            statusBtn.textContent = mode === 'talk' ? '🎤 Подключение...' : '👂 Подключение...';
+            statusBtn.className = 'chat-call-btn';
+            statusBtn.disabled = true;
+            statusBtn.style.opacity = '0.6';
+            document.querySelector('.chat-tabs').appendChild(statusBtn);
+            
+            try {
+                showSystemMessage('📞 Отвечаем ' + fromUsername + ' (' + (mode === 'talk' ? 'с микрофоном' : 'только слушать') + ')...');
+                
+                var pc = new RTCPeerConnection({
+                    iceServers: [
+                        { urls: 'stun:stun.l.google.com:19302' },
+                        { urls: 'stun:stun1.l.google.com:19302' }
+                    ]
+                });
+                
+                var stream = null;
+                var actualMode = mode;
+                
+                if (mode === 'talk') {
+                    try {
+                        stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                        stream.getTracks().forEach(function(track) { pc.addTrack(track, stream); });
+                    } catch (micError) {
+                        console.warn('Нет доступа к микрофону:', micError);
+                        showSystemMessage('⚠️ Микрофон не найден, переключаемся в режим "только слушать"');
+                        actualMode = 'listen';
+                        statusBtn.textContent = '👂 Нет микрофона, только слушаем...';
+                    }
+                }
+                
+                pc.ontrack = function(event) {
+                    var audio = new Audio();
+                    audio.srcObject = event.streams[0];
+                    audio.autoplay = true;
+                    audioElements.set(fromUsername, audio);
+                    showSystemMessage('👂 Аудио подключено, вы слышите ' + fromUsername);
+                    if (actualMode === 'listen') {
+                        showSystemMessage('💬 Вы можете отвечать текстом в чате');
+                    } else {
+                        showSystemMessage('🎙️ Разговор начался, говорите в микрофон');
+                    }
+                    updateCallButton(fromUsername, true, actualMode === 'listen');
+                };
+                
+                pc.oniceconnectionstatechange = function() {
+                    if (pc.iceConnectionState === 'disconnected' || pc.iceConnectionState === 'failed' || pc.iceConnectionState === 'closed') {
+                        window.endCall(fromUsername);
+                    }
+                };
+                
+                pc.onconnectionstatechange = function() {
+                    if (pc.connectionState === 'connected') {
+                        var btn = document.getElementById('chatCallBtn');
+                        if (btn) {
+                            btn.textContent = actualMode === 'listen' ? '🎧 Завершить прослушивание' : '🔴 Положить трубку';
+                            btn.disabled = false;
+                            btn.style.opacity = '1';
+                            btn.onclick = function() { window.endCall(fromUsername); };
+                        }
+                    }
+                };
+                
+                await pc.setRemoteDescription(new RTCSessionDescription(offer));
+                var answer = await pc.createAnswer();
+                await pc.setLocalDescription(answer);
+                
+                activeCalls.set(fromUsername, { pc: pc, stream: stream, mode: actualMode, isReceiveOnly: actualMode === 'listen' });
+                
+                ws.send(JSON.stringify({
+                    type: 'call_answer',
+                    to: fromUsername,
+                    answer: { sdp: answer.sdp, type: answer.type },
+                    mode: actualMode
+                }));
+                
+                pendingCalls.delete(fromUsername);
+                
+            } catch (error) {
+                console.error('Ошибка ответа:', error);
+                showSystemMessage('❌ Не удалось ответить на звонок: ' + error.message);
+                statusBtn.remove();
+                showCallButtonWithMode(fromUsername);
+                pendingCalls.delete(fromUsername);
+            }
+        }
+        
+        window.startCall = async function(targetUsername, mode) {
+            if (targetUsername === currentUser) {
+                showSystemMessage('Нельзя позвонить самому себе');
+                return;
+            }
+            
+            if (activeCalls.has(targetUsername)) {
+                showSystemMessage('У вас уже есть активный звонок с ' + targetUsername);
+                return;
+            }
+            
+            if (pendingCalls.has(targetUsername)) {
+                showSystemMessage('Пользователь уже звонит вам');
+                return;
+            }
+            
+            var isSpam = false;
+            for (var i = 0; i < spamList.length; i++) {
+                if (spamList[i] === targetUsername) isSpam = true;
+            }
+            if (isSpam) {
+                showSystemMessage('⚠️ Нельзя звонить пользователю из черного списка');
+                return;
+            }
+            
+            var oldBtn = document.getElementById('chatCallBtn');
+            var oldRejectBtn = document.getElementById('chatRejectBtn');
+            var oldMode = document.getElementById('callModeSelect');
+            var oldListen = document.getElementById('chatListenBtn');
+            if (oldBtn) oldBtn.remove();
+            if (oldRejectBtn) oldRejectBtn.remove();
+            if (oldMode) oldMode.remove();
+            if (oldListen) oldListen.remove();
+            
+            try {
+                var pc = new RTCPeerConnection({
+                    iceServers: [
+                        { urls: 'stun:stun.l.google.com:19302' },
+                        { urls: 'stun:stun1.l.google.com:19302' }
+                    ]
+                });
+                
+                var stream = null;
+                var actualMode = mode;
+                
+                if (mode === 'talk') {
+                    try {
+                        showSystemMessage('🎤 Запрашиваем доступ к микрофону...');
+                        stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                        stream.getTracks().forEach(function(track) { pc.addTrack(track, stream); });
+                        showSystemMessage('✅ Микрофон готов');
+                    } catch (micError) {
+                        console.warn('Нет доступа к микрофону:', micError);
+                        showSystemMessage('⚠️ Микрофон не найден, звонок будет в режиме "только слушать"');
+                        actualMode = 'listen';
+                    }
+                } else {
+                    showSystemMessage('👂 Звонок в режиме "только слушать"');
+                }
+                
+                pc.ontrack = function(event) {
+                    var audio = new Audio();
+                    audio.srcObject = event.streams[0];
+                    audio.autoplay = true;
+                    audioElements.set(targetUsername, audio);
+                    showSystemMessage('👂 Аудио подключено, вы слышите ' + targetUsername);
+                    if (actualMode !== 'talk') {
+                        showSystemMessage('💬 Вы можете отвечать текстом в чате');
+                    } else {
+                        showSystemMessage('🎙️ Разговор начался, говорите в микрофон');
+                    }
+                    updateCallButton(targetUsername, true, actualMode !== 'talk');
+                };
+                
+                pc.oniceconnectionstatechange = function() {
+                    if (pc.iceConnectionState === 'disconnected' || pc.iceConnectionState === 'failed' || pc.iceConnectionState === 'closed') {
+                        window.endCall(targetUsername);
+                    }
+                };
+                
+                pc.onconnectionstatechange = function() {
+                    if (pc.connectionState === 'connected') {
+                        updateCallButton(targetUsername, true, actualMode !== 'talk');
+                    }
+                };
+                
+                var offer = await pc.createOffer();
+                await pc.setLocalDescription(offer);
+                
+                activeCalls.set(targetUsername, { pc: pc, stream: stream, mode: actualMode, isReceiveOnly: actualMode !== 'talk' });
+                
+                ws.send(JSON.stringify({
+                    type: 'call_offer',
+                    to: targetUsername,
+                    offer: { sdp: offer.sdp, type: offer.type },
+                    mode: actualMode
+                }));
+                
+                showSystemMessage('📞 Звоним ' + targetUsername + ' (' + (actualMode === 'talk' ? 'с микрофоном' : 'только слушать') + ')...');
+                
+                var headerDiv = document.querySelector('.chat-tabs');
+                var callBtn = document.createElement('button');
+                callBtn.id = 'chatCallBtn';
+                callBtn.textContent = actualMode === 'talk' ? '🔴 Положить трубку' : '🎧 Завершить прослушивание';
+                callBtn.className = 'chat-call-btn ongoing';
+                callBtn.style.background = '#da3633';
+                callBtn.onclick = function() { window.endCall(targetUsername); };
+                headerDiv.appendChild(callBtn);
+                
+            } catch (error) {
+                console.error('Ошибка звонка:', error);
+                showSystemMessage('❌ Не удалось начать звонок: ' + error.message);
+                if (activeCalls.has(targetUsername)) {
+                    activeCalls.delete(targetUsername);
+                }
+                showCallButtonWithMode(targetUsername);
+            }
+        };
+        
+        window.endCall = function(targetUsername) {
+            var call = activeCalls.get(targetUsername);
+            if (!call) {
+                showCallButtonWithMode(targetUsername);
+                return;
+            }
+            
+            var audio = audioElements.get(targetUsername);
+            if (audio) {
+                audio.pause();
+                audio.srcObject = null;
+                audioElements.delete(targetUsername);
+            }
+            
+            if (call.stream) {
+                call.stream.getTracks().forEach(function(track) { track.stop(); });
+            }
+            if (call.pc) {
+                call.pc.close();
+            }
+            activeCalls.delete(targetUsername);
+            
+            ws.send(JSON.stringify({ type: 'call_end', to: targetUsername }));
+            showSystemMessage('📞 Звонок с ' + targetUsername + ' завершен');
+            
+            showCallButtonWithMode(targetUsername);
+            
+            var rejectBtn = document.getElementById('chatRejectBtn');
+            if (rejectBtn) rejectBtn.remove();
+        };
         
         function addPrivateChatTab(username) {
             var tabsContainer = document.getElementById('chatTabs');
@@ -884,7 +1210,6 @@ HTML_PAGE = r'''<!DOCTYPE html>
         }
         
         window.closePrivateChat = function(username) {
-            // Завершаем звонок если он активен
             if (activeCalls.has(username)) {
                 window.endCall(username);
             }
@@ -924,9 +1249,11 @@ HTML_PAGE = r'''<!DOCTYPE html>
                 for (var i = 0; i < messages.length; i++) {
                     addPrivateMessageToChat(messages[i], chatId);
                 }
+                if (!document.getElementById('callModeSelect') && !document.getElementById('chatCallBtn')) {
+                    showCallButtonWithMode(chatId);
+                }
             }
             scrollToBottom();
-            updateChatHeaderCallButton();
         };
         
         window.startPrivateChat = function(username) {
@@ -934,7 +1261,6 @@ HTML_PAGE = r'''<!DOCTYPE html>
                 showSystemMessage('Нельзя начать чат с самим собой');
                 return;
             }
-            // Проверяем черный список
             var isSpam = false;
             for (var i = 0; i < spamList.length; i++) {
                 if (spamList[i] === username) isSpam = true;
@@ -950,222 +1276,6 @@ HTML_PAGE = r'''<!DOCTYPE html>
             window.switchChat(username);
             usersSidebar.classList.remove('show');
         };
-        
-        // ========== ЗВОНКИ ==========
-        
-        function updateCallButton(username, isCallActive) {
-            // Обновляем кнопку в хедере чата если этот чат открыт
-            if (currentChat === username) {
-                var callBtn = document.getElementById('chatCallBtn');
-                if (callBtn) {
-                    callBtn.textContent = isCallActive ? '🔴 Положить трубку' : '📞 Позвонить';
-                    callBtn.className = 'chat-call-btn' + (isCallActive ? ' ongoing' : '');
-                }
-            }
-        }
-        
-        function rejectCall(fromUsername) {
-            pendingCalls.delete(fromUsername);
-            ws.send(JSON.stringify({ type: 'call_reject', to: fromUsername }));
-            showSystemMessage('📞 Вы отклонили звонок от ' + fromUsername);
-        }
-        
-        function showIncomingCall(fromUsername, offer) {
-            // Проверяем, не в черном ли списке звонящий
-            var isSpam = false;
-            for (var i = 0; i < spamList.length; i++) {
-                if (spamList[i] === fromUsername) isSpam = true;
-            }
-            if (isSpam) {
-                // Автоматически отклоняем звонок от спамера
-                ws.send(JSON.stringify({ type: 'call_reject', to: fromUsername }));
-                return;
-            }
-            
-            pendingCalls.set(fromUsername, offer);
-            showSystemMessage('📞 ' + fromUsername + ' звонит вам! Открываем чат...');
-            
-            // Автоматически открываем чат со звонящим
-            if (!privateChats.has(fromUsername)) {
-                privateChats.set(fromUsername, []);
-                addPrivateChatTab(fromUsername);
-            }
-            window.switchChat(fromUsername);
-            
-            // Показываем кнопки ответа/отклонения в чате
-            var callBtn = document.getElementById('chatCallBtn');
-            if (callBtn) {
-                callBtn.textContent = '✅ Ответить';
-                callBtn.style.background = '#238636';
-                callBtn.onclick = function() {
-                    answerCall(fromUsername, offer);
-                };
-                
-                // Добавляем кнопку отклонения
-                var rejectBtn = document.createElement('button');
-                rejectBtn.id = 'chatRejectBtn';
-                rejectBtn.textContent = '❌ Отклонить';
-                rejectBtn.className = 'chat-call-btn';
-                rejectBtn.style.background = '#da3633';
-                rejectBtn.style.marginLeft = '5px';
-                rejectBtn.onclick = function() {
-                    rejectCall(fromUsername);
-                    rejectBtn.remove();
-                    var btn = document.getElementById('chatCallBtn');
-                    if (btn) {
-                        btn.textContent = '📞 Позвонить';
-                        btn.style.background = '#238636';
-                        btn.onclick = function() { window.startCall(fromUsername); };
-                    }
-                };
-                callBtn.parentNode.appendChild(rejectBtn);
-            }
-        }
-        
-        async function answerCall(fromUsername, offer) {
-            // Убираем кнопку отклонения
-            var rejectBtn = document.getElementById('chatRejectBtn');
-            if (rejectBtn) rejectBtn.remove();
-            
-            try {
-                showSystemMessage('📞 Отвечаем ' + fromUsername + '...');
-                var stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-                var pc = new RTCPeerConnection({
-                    iceServers: [
-                        { urls: 'stun:stun.l.google.com:19302' },
-                        { urls: 'stun:stun1.l.google.com:19302' }
-                    ]
-                });
-                
-                stream.getTracks().forEach(function(track) { pc.addTrack(track, stream); });
-                activeCalls.set(fromUsername, { pc: pc, stream: stream });
-                
-                pc.ontrack = function(event) {
-                    var audio = new Audio();
-                    audio.srcObject = event.streams[0];
-                    audio.autoplay = true;
-                    showSystemMessage('📞 Разговор с ' + fromUsername + ' начался');
-                    updateCallButton(fromUsername, true);
-                };
-                
-                pc.oniceconnectionstatechange = function() {
-                    if (pc.iceConnectionState === 'disconnected' || pc.iceConnectionState === 'failed' || pc.iceConnectionState === 'closed') {
-                        window.endCall(fromUsername);
-                    }
-                };
-                
-                await pc.setRemoteDescription(new RTCSessionDescription(offer));
-                var answer = await pc.createAnswer();
-                await pc.setLocalDescription(answer);
-                
-                ws.send(JSON.stringify({
-                    type: 'call_answer',
-                    to: fromUsername,
-                    answer: { sdp: answer.sdp, type: answer.type }
-                }));
-                
-                updateCallButton(fromUsername, true);
-                pendingCalls.delete(fromUsername);
-                
-            } catch (error) {
-                console.error('Ошибка ответа:', error);
-                showSystemMessage('❌ Не удалось ответить на звонок. Проверьте микрофон.');
-                updateCallButton(fromUsername, false);
-                pendingCalls.delete(fromUsername);
-            }
-        }
-        
-        window.startCall = async function(targetUsername) {
-            if (targetUsername === currentUser) {
-                showSystemMessage('Нельзя позвонить самому себе');
-                return;
-            }
-            if (activeCalls.has(targetUsername)) {
-                showSystemMessage('У вас уже есть активный звонок с этим пользователем');
-                return;
-            }
-            if (pendingCalls.has(targetUsername)) {
-                showSystemMessage('Пользователь уже звонит вам');
-                return;
-            }
-            
-            // Проверяем черный список
-            var isSpam = false;
-            for (var i = 0; i < spamList.length; i++) {
-                if (spamList[i] === targetUsername) isSpam = true;
-            }
-            if (isSpam) {
-                showSystemMessage('⚠️ Нельзя звонить пользователю из черного списка');
-                return;
-            }
-            
-            try {
-                showSystemMessage('📞 Запрашиваем доступ к микрофону...');
-                var stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-                var pc = new RTCPeerConnection({
-                    iceServers: [
-                        { urls: 'stun:stun.l.google.com:19302' },
-                        { urls: 'stun:stun1.l.google.com:19302' }
-                    ]
-                });
-                
-                stream.getTracks().forEach(function(track) { pc.addTrack(track, stream); });
-                activeCalls.set(targetUsername, { pc: pc, stream: stream });
-                
-                pc.ontrack = function(event) {
-                    var audio = new Audio();
-                    audio.srcObject = event.streams[0];
-                    audio.autoplay = true;
-                    showSystemMessage('📞 Разговор с ' + targetUsername + ' начался');
-                    updateCallButton(targetUsername, true);
-                };
-                
-                pc.oniceconnectionstatechange = function() {
-                    if (pc.iceConnectionState === 'disconnected' || pc.iceConnectionState === 'failed' || pc.iceConnectionState === 'closed') {
-                        window.endCall(targetUsername);
-                    }
-                };
-                
-                var offer = await pc.createOffer();
-                await pc.setLocalDescription(offer);
-                
-                ws.send(JSON.stringify({
-                    type: 'call_offer',
-                    to: targetUsername,
-                    offer: { sdp: offer.sdp, type: offer.type }
-                }));
-                
-                showSystemMessage('📞 Звоним ' + targetUsername + '...');
-                updateCallButton(targetUsername, true);
-                
-            } catch (error) {
-                console.error('Ошибка звонка:', error);
-                showSystemMessage('❌ Не удалось начать звонок (нет доступа к микрофону)');
-                if (activeCalls.has(targetUsername)) {
-                    activeCalls.delete(targetUsername);
-                }
-                updateCallButton(targetUsername, false);
-            }
-        };
-        
-        window.endCall = function(targetUsername) {
-            var call = activeCalls.get(targetUsername);
-            if (call) {
-                if (call.stream) {
-                    call.stream.getTracks().forEach(function(track) { track.stop(); });
-                }
-                if (call.pc) {
-                    call.pc.close();
-                }
-                activeCalls.delete(targetUsername);
-            }
-            ws.send(JSON.stringify({ type: 'call_end', to: targetUsername }));
-            showSystemMessage('📞 Звонок с ' + targetUsername + ' завершен');
-            updateCallButton(targetUsername, false);
-            pendingCalls.delete(targetUsername);
-        };
-        
-        // ========== ОСТАЛЬНЫЕ ФУНКЦИИ ==========
         
         function isSpamUser(username) {
             for (var i = 0; i < spamList.length; i++) {
@@ -1208,14 +1318,10 @@ HTML_PAGE = r'''<!DOCTYPE html>
                 html += '<div class="user-avatar ' + (isSpam ? 'spam' : '') + '"></div>';
                 html += '<div class="user-name">' + escapeHtml(user.name) + (isCurrent ? ' (Вы)' : '') + sessionsHtml + statsHtml + '</div>';
                 
-                if (!isCurrent && !isSpam) {
-                    // Кнопка звонка убрана из списка пользователей - звонить можно только из чата
+                if (!isCurrent) {
                     var badgeText = isSpam ? 'Снять спам' : 'Спам';
                     var badgeClass = isSpam ? 'spam-badge' : 'private-badge';
                     html += '<span class="' + badgeClass + '" onclick="event.stopPropagation(); toggleSpam(\'' + escapeHtml(user.name) + '\')">' + badgeText + '</span>';
-                } else if (!isCurrent && isSpam) {
-                    var badgeText = 'Снять спам';
-                    html += '<span class="spam-badge" onclick="event.stopPropagation(); toggleSpam(\'' + escapeHtml(user.name) + '\')">' + badgeText + '</span>';
                 }
                 html += '</div>';
             }
@@ -1234,7 +1340,6 @@ HTML_PAGE = r'''<!DOCTYPE html>
                 spamList = newList;
                 showSystemMessage(username + ' удален из черного списка');
             } else {
-                // При добавлении в спам завершаем активный звонок если есть
                 if (activeCalls.has(username)) {
                     window.endCall(username);
                 }
@@ -1272,10 +1377,7 @@ HTML_PAGE = r'''<!DOCTYPE html>
             if (newName && newName.trim() && newName.trim() !== currentUser) {
                 var trimmedName = newName.trim().substring(0, 20);
                 if (ws && ws.readyState === WebSocket.OPEN) {
-                    ws.send(JSON.stringify({ 
-                        type: 'change_username', 
-                        new_username: trimmedName 
-                    }));
+                    ws.send(JSON.stringify({ type: 'change_username', new_username: trimmedName }));
                 } else {
                     showSystemMessage('❌ Нет соединения с сервером');
                 }
@@ -1289,6 +1391,9 @@ HTML_PAGE = r'''<!DOCTYPE html>
                 ws.send(JSON.stringify({ type: 'message', text: text }));
             } else {
                 ws.send(JSON.stringify({ type: 'private_message', to: currentChat, text: text }));
+                if (activeCalls.has(currentChat)) {
+                    showSystemMessage('💬 Вы: ' + text);
+                }
             }
             messageInput.value = '';
             if (isTyping) {
@@ -1330,7 +1435,16 @@ HTML_PAGE = r'''<!DOCTYPE html>
             if (currentChat === otherUser) {
                 addPrivateMessageToChat(message, otherUser);
             } else if (!isFromMe) {
-                showNotification(otherUser);
+                var tabs = document.getElementById('chatTabs');
+                for (var i = 0; i < tabs.children.length; i++) {
+                    if (tabs.children[i].getAttribute('data-chat') === otherUser) {
+                        tabs.children[i].style.background = '#ff9800';
+                        setTimeout(function(tab) {
+                            if (currentChat !== otherUser) tab.style.background = '';
+                        }, 1000, tabs.children[i]);
+                        break;
+                    }
+                }
             }
         }
         
@@ -1376,12 +1490,16 @@ HTML_PAGE = r'''<!DOCTYPE html>
                     filterUsers();
                     break;
                 case 'call_offer':
-                    showIncomingCall(data.from, data.offer);
+                    showIncomingCall(data.from, data.offer, data.mode || 'talk');
                     break;
                 case 'call_answer':
                     var call = activeCalls.get(data.from);
                     if (call && call.pc) {
                         call.pc.setRemoteDescription(new RTCSessionDescription(data.answer));
+                        if (data.mode === 'listen') {
+                            call.isReceiveOnly = true;
+                            updateCallButton(data.from, true, true);
+                        }
                     }
                     break;
                 case 'call_reject':
@@ -1462,6 +1580,20 @@ HTML_PAGE = r'''<!DOCTYPE html>
                 }
             }
         };
+        
+        messageInput.addEventListener('input', function() {
+            if (!isTyping && messageInput.value.trim()) {
+                isTyping = true;
+                ws.send(JSON.stringify({ type: 'typing', is_typing: true }));
+            }
+            if (typingTimeout) clearTimeout(typingTimeout);
+            typingTimeout = setTimeout(function() {
+                if (isTyping) {
+                    isTyping = false;
+                    ws.send(JSON.stringify({ type: 'typing', is_typing: false }));
+                }
+            }, 1000);
+        });
     </script>
 </body>
 </html>'''
