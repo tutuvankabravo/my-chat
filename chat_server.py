@@ -23,7 +23,6 @@ class UserAuth:
     def __init__(self, users_file_path="users.json"):
         self.users_file_path = users_file_path
         self.users_cache = {}
-        self.last_sync_time = 0
         
     def load_users(self, force=False):
         """Загружает пользователей из JSON файла"""
@@ -95,7 +94,7 @@ class UserAuth:
         return False, "Ошибка аутентификации"
     
     def get_user_name(self, email):
-        """Возвращает имя пользователя по email"""
+        """Возвращает имя пользователя по email (только из JSON, нельзя изменить)"""
         if email in self.users_cache:
             return self.users_cache[email].get('name', email.split('@')[0])
         return email.split('@')[0]
@@ -157,27 +156,29 @@ class ChatServer:
         return f"{base_nickname}{counter}"
 
     async def register(self, ws, email, username, session_id):
-        """Регистрация подключения"""
-        # Проверка уникальности ника
-        original_username = username
-        if self.is_nickname_taken(username):
-            username = self.generate_unique_nickname(username)
+        """Регистрация подключения - имя ТОЛЬКО из JSON, нельзя изменить"""
+        # Имя берётся строго из JSON, игнорируем то, что прислал клиент
+        fixed_username = user_auth.get_user_name(email)
+        
+        # Проверка уникальности ника (на случай, если в JSON одинаковые имена)
+        if self.is_nickname_taken(fixed_username):
+            fixed_username = self.generate_unique_nickname(fixed_username)
             await ws.send_str(json.dumps({
                 'type': 'system',
-                'message': f'⚠️ Имя "{original_username}" уже занято. Вы вошли как "{username}"'
+                'message': f'⚠️ Имя "{fixed_username}" уже занято. Вы вошли как "{fixed_username}"'
             }))
         
         self.clients[ws] = {
-            'username': username, 
+            'username': fixed_username, 
             'email': email,
             'session_id': session_id
         }
         connected_clients.add(ws)
         
-        if username not in self.spam_filters:
-            self.spam_filters[username] = []
+        if fixed_username not in self.spam_filters:
+            self.spam_filters[fixed_username] = []
         
-        session_key = f"{username}_{session_id}"
+        session_key = f"{fixed_username}_{session_id}"
         self.user_sessions[session_key] = self.user_sessions.get(session_key, 0) + 1
 
         # Отправляем историю сообщений
@@ -191,11 +192,17 @@ class ChatServer:
         if self.user_sessions[session_key] == 1:
             await self.broadcast({
                 'type': 'system',
-                'message': f'👋 {username} присоединился к чату',
+                'message': f'👋 {fixed_username} присоединился к чату',
                 'users_count': len(self.get_unique_users())
             })
         
         await self.broadcast_users_list()
+        
+        # Отправляем приветственное сообщение
+        await ws.send_str(json.dumps({
+            'type': 'system',
+            'message': f'✅ Добро пожаловать в чат, {fixed_username}! Ваше имя зафиксировано в системе.'
+        }))
 
     async def unregister(self, ws):
         """Отключение пользователя"""
@@ -311,43 +318,6 @@ class ChatServer:
             part_text = f"[{idx}/{len(parts)}] {part}" if len(parts) > 1 else part
             await self.send_private_message(from_username, to_username, part_text, f"{message_id}_{idx}")
 
-    async def change_username(self, ws, old_username, new_username):
-        """Смена ника"""
-        if not new_username or not new_username.strip():
-            await ws.send_str(json.dumps({
-                'type': 'system',
-                'message': '❌ Имя не может быть пустым'
-            }))
-            return False
-        
-        new_username = new_username.strip()[:20]
-        
-        if self.is_nickname_taken(new_username, exclude_ws=ws):
-            await ws.send_str(json.dumps({
-                'type': 'system',
-                'message': f'❌ Имя "{new_username}" уже занято. Выберите другое'
-            }))
-            return False
-        
-        self.clients[ws]['username'] = new_username
-        
-        if old_username in self.spam_filters:
-            self.spam_filters[new_username] = self.spam_filters.pop(old_username)
-        
-        await self.broadcast({
-            'type': 'system',
-            'message': f'✏️ {old_username} сменил имя на {new_username}'
-        })
-        
-        await self.broadcast_users_list()
-        
-        await ws.send_str(json.dumps({
-            'type': 'system',
-            'message': f'✅ Вы успешно сменили имя на {new_username}'
-        }))
-        
-        return True
-
     async def handle_message(self, ws, data):
         """Обработка сообщений от клиента"""
         if ws not in self.clients:
@@ -393,10 +363,6 @@ class ChatServer:
                     if len(messages_history) > MAX_HISTORY:
                         messages_history.pop(0)
                     await self.broadcast(message)
-
-        elif msg_type == 'change_username':
-            new_username = data.get('new_username', '')
-            await self.change_username(ws, username, new_username)
 
         elif msg_type == 'private_message':
             to_username = data.get('to')
@@ -615,12 +581,13 @@ HTML_PAGE = r'''<!DOCTYPE html>
 
         .username-display {
             background: #21262d;
-            padding: 3px 8px;
+            padding: 5px 12px;
             border-radius: 20px;
-            font-size: 0.8em;
+            font-size: 0.85em;
+            font-weight: bold;
         }
 
-        .toggle-users-btn, .change-name-btn {
+        .toggle-users-btn {
             background: #21262d;
             border: 1px solid #30363d;
             color: #f0f6fc;
@@ -631,7 +598,7 @@ HTML_PAGE = r'''<!DOCTYPE html>
             min-height: 34px;
         }
 
-        /* Основная область с чатом и сайдбаром */
+        /* Основная область */
         .chat-main {
             display: flex;
             flex: 1;
@@ -639,7 +606,7 @@ HTML_PAGE = r'''<!DOCTYPE html>
             min-height: 0;
         }
 
-        /* Сайдбар с пользователями */
+        /* Сайдбар */
         .users-sidebar {
             width: 280px;
             background: #161b22;
@@ -715,6 +682,7 @@ HTML_PAGE = r'''<!DOCTYPE html>
             gap: 8px;
             cursor: pointer;
             min-height: 44px;
+            position: relative;
         }
 
         .user-item:hover { background: #21262d; }
@@ -731,12 +699,26 @@ HTML_PAGE = r'''<!DOCTYPE html>
         .user-avatar.spam { background: #da3633; }
         .user-avatar.blocked { background: #ff0000; }
         .user-name { flex: 1; font-size: 14px; }
+        
         .blocked-badge {
             font-size: 0.7em;
             padding: 2px 6px;
             border-radius: 10px;
             background: #8b0000;
             color: white;
+        }
+
+        /* Счётчик непрочитанных сообщений */
+        .unread-badge {
+            background: #e74c3c;
+            color: white;
+            border-radius: 20px;
+            padding: 2px 6px;
+            font-size: 0.7em;
+            font-weight: bold;
+            min-width: 20px;
+            text-align: center;
+            margin-left: 5px;
         }
 
         /* Область сообщений */
@@ -769,6 +751,7 @@ HTML_PAGE = r'''<!DOCTYPE html>
             white-space: nowrap;
             font-size: 14px;
             min-height: 34px;
+            position: relative;
         }
 
         .chat-tab.active {
@@ -780,6 +763,16 @@ HTML_PAGE = r'''<!DOCTYPE html>
             margin-left: 8px;
             cursor: pointer;
             font-weight: bold;
+        }
+
+        /* Счётчик на вкладке */
+        .tab-unread {
+            background: #e74c3c;
+            color: white;
+            border-radius: 12px;
+            padding: 2px 6px;
+            font-size: 0.7em;
+            margin-left: 6px;
         }
 
         /* Контейнер сообщений */
@@ -859,7 +852,7 @@ HTML_PAGE = r'''<!DOCTYPE html>
             flex-shrink: 0;
         }
 
-        /* НИЖНЯЯ ПАНЕЛЬ ВВОДА - В САМОМ НИЗУ */
+        /* НИЖНЯЯ ПАНЕЛЬ ВВОДА */
         .input-area {
             background: #161b22;
             border-top: 1px solid #30363d;
@@ -867,7 +860,8 @@ HTML_PAGE = r'''<!DOCTYPE html>
             display: flex;
             gap: 8px;
             flex-shrink: 0;
-            /* Учитываем безопасную зону для iPhone */
+            align-items: flex-end;
+            position: relative;
             padding-bottom: max(10px, env(safe-area-inset-bottom));
         }
 
@@ -895,6 +889,23 @@ HTML_PAGE = r'''<!DOCTYPE html>
             cursor: pointer;
             font-weight: bold;
             min-height: 44px;
+            position: relative;
+        }
+
+        /* Общий счётчик непрочитанных над кнопкой */
+        .total-unread {
+            position: absolute;
+            top: -8px;
+            right: -8px;
+            background: #e74c3c;
+            color: white;
+            border-radius: 20px;
+            padding: 2px 6px;
+            font-size: 0.7em;
+            font-weight: bold;
+            min-width: 18px;
+            text-align: center;
+            box-shadow: 0 0 4px rgba(0,0,0,0.3);
         }
 
         @media (max-width: 768px) {
@@ -941,14 +952,13 @@ HTML_PAGE = r'''<!DOCTYPE html>
             </div>
             <div class="user-info">
                 <span class="username-display" id="currentUsername">Загрузка...</span>
-                <button class="change-name-btn" id="changeNameBtn">Сменить имя</button>
                 <button class="toggle-users-btn" id="toggleUsersBtn">Участники</button>
             </div>
         </div>
 
         <!-- ОСНОВНАЯ ОБЛАСТЬ -->
         <div class="chat-main">
-            <!-- Сайдбар с пользователями -->
+            <!-- Сайдбар -->
             <div class="users-sidebar" id="usersSidebar">
                 <div class="users-header">Участники (<span id="usersCount">0</span>)</div>
                 <div class="search-box">
@@ -975,7 +985,10 @@ HTML_PAGE = r'''<!DOCTYPE html>
         <!-- НИЖНЯЯ ПАНЕЛЬ ВВОДА -->
         <div class="input-area">
             <textarea id="messageInput" class="message-input" placeholder="Введите сообщение..."></textarea>
-            <button class="send-btn" id="sendButton">Отправить</button>
+            <button class="send-btn" id="sendButton">
+                Отправить
+                <span id="totalUnread" class="total-unread" style="display: none;">0</span>
+            </button>
         </div>
     </div>
 
@@ -989,14 +1002,16 @@ HTML_PAGE = r'''<!DOCTYPE html>
         setMobileHeight();
         window.addEventListener('resize', () => {
             setTimeout(setMobileHeight, 100);
-            // При изменении размера (например, открытие клавиатуры) скроллим вниз
             setTimeout(() => {
                 const container = document.getElementById('messagesContainer');
                 if (container) container.scrollTop = container.scrollHeight;
             }, 50);
         });
         
-        // Блокируем скролл body, разрешаем только внутри контейнеров
+        // Определяем мобильное устройство
+        const isMobile = 'ontouchstart' in window;
+        
+        // Блокируем скролл body
         document.body.addEventListener('touchmove', function(e) {
             if (e.target.closest('.messages-container') || 
                 e.target.closest('.users-list') ||
@@ -1006,18 +1021,11 @@ HTML_PAGE = r'''<!DOCTYPE html>
             e.preventDefault();
         }, { passive: false });
         
-        // Фикс для iOS
         window.addEventListener('scroll', function() {
             if (window.scrollY !== 0) {
                 window.scrollTo(0, 0);
             }
         });
-        
-        // Фокус на поле ввода при загрузке
-        setTimeout(() => {
-            const input = document.getElementById('messageInput');
-            if (input) input.focus();
-        }, 500);
         
         // === ПЕРЕМЕННЫЕ ===
         var ws = null;
@@ -1033,7 +1041,11 @@ HTML_PAGE = r'''<!DOCTYPE html>
         var currentUserFilter = 'all';
         var spamStats = {};
         var spamList = [];
-        var blockedUsers = []; // Список заблокированных пользователей
+        var blockedUsers = [];
+        
+        // Счётчики непрочитанных сообщений
+        var unreadCounts = {}; // { "имя_пользователя": количество }
+        var totalUnread = 0;
         
         // DOM элементы
         var authScreen = document.getElementById('authScreen');
@@ -1051,11 +1063,126 @@ HTML_PAGE = r'''<!DOCTYPE html>
         var usersList = document.getElementById('usersList');
         var usersSidebar = document.getElementById('usersSidebar');
         var sendButton = document.getElementById('sendButton');
-        var changeNameBtn = document.getElementById('changeNameBtn');
         var toggleUsersBtn = document.getElementById('toggleUsersBtn');
         var userSearch = document.getElementById('userSearch');
+        var totalUnreadSpan = document.getElementById('totalUnread');
         
         window.messagesHistory = [];
+        
+        // === ФУНКЦИИ ДЛЯ РАБОТЫ СО СЧЁТЧИКАМИ ===
+        function updateTotalUnreadDisplay() {
+            if (totalUnread > 0) {
+                totalUnreadSpan.textContent = totalUnread > 99 ? '99+' : totalUnread;
+                totalUnreadSpan.style.display = 'inline-block';
+            } else {
+                totalUnreadSpan.style.display = 'none';
+            }
+        }
+        
+        function incrementUnreadCount(fromUser) {
+            if (fromUser === currentUser) return;
+            if (currentChat === fromUser) return; // Если чат открыт, не считаем
+            
+            if (!unreadCounts[fromUser]) {
+                unreadCounts[fromUser] = 0;
+            }
+            unreadCounts[fromUser]++;
+            totalUnread++;
+            
+            updateTotalUnreadDisplay();
+            updateUsersListDisplay();
+            updateTabUnread(fromUser);
+        }
+        
+        function clearUnreadCount(user) {
+            if (unreadCounts[user]) {
+                totalUnread -= unreadCounts[user];
+                unreadCounts[user] = 0;
+                updateTotalUnreadDisplay();
+                updateUsersListDisplay();
+                updateTabUnread(user);
+            }
+        }
+        
+        function updateTabUnread(user) {
+            var tabs = document.querySelectorAll('.chat-tab');
+            for (var i = 0; i < tabs.length; i++) {
+                var tab = tabs[i];
+                var tabUser = tab.getAttribute('data-chat');
+                if (tabUser === user) {
+                    // Удаляем старый счётчик
+                    var oldSpan = tab.querySelector('.tab-unread');
+                    if (oldSpan) oldSpan.remove();
+                    
+                    // Добавляем новый если есть
+                    var count = unreadCounts[user] || 0;
+                    if (count > 0) {
+                        var span = document.createElement('span');
+                        span.className = 'tab-unread';
+                        span.textContent = count > 99 ? '99+' : count;
+                        tab.appendChild(span);
+                    }
+                    break;
+                }
+            }
+        }
+        
+        function updateUsersListDisplay() {
+            // Обновляем отображение списка пользователей с учётом счётчиков
+            var searchValue = userSearch.value.toLowerCase();
+            var filtered = [];
+            for (var i = 0; i < allUsers.length; i++) {
+                var user = allUsers[i];
+                if (searchValue && user.name.toLowerCase().indexOf(searchValue) === -1) continue;
+                if (currentUserFilter === 'spam' && !isSpamUser(user.name)) continue;
+                if (currentUserFilter === 'clean' && isSpamUser(user.name)) continue;
+                filtered.push(user);
+            }
+            filtered.sort(function(a, b) {
+                if (a.name === currentUser) return -1;
+                if (b.name === currentUser) return 1;
+                if (a.name < b.name) return -1;
+                if (a.name > b.name) return 1;
+                return 0;
+            });
+            
+            if (filtered.length === 0) {
+                usersList.innerHTML = '<div style="padding:10px;text-align:center;">Пользователи не найдены</div>';
+                return;
+            }
+            
+            var html = '';
+            for (var i = 0; i < filtered.length; i++) {
+                var user = filtered[i];
+                var isCurrent = (user.name === currentUser);
+                var isSpam = isSpamUser(user.name);
+                var isBlocked = isBlockedUser(user.name);
+                var sessionsHtml = (user.sessions > 1) ? ' (' + user.sessions + ' вкладки)' : '';
+                var spamCount = spamStats[user.name] || 0;
+                var statsHtml = spamCount > 0 ? ' ⚠️' + spamCount : '';
+                var unreadCount = unreadCounts[user.name] || 0;
+                var unreadHtml = (unreadCount > 0 && !isCurrent) ? '<span class="unread-badge">' + (unreadCount > 99 ? '99+' : unreadCount) + '</span>' : '';
+                
+                var onClick = (isCurrent || isBlocked) ? '' : ' onclick="startPrivateChat(\'' + escapeHtml(user.name) + '\')"';
+                var onSpam = !isCurrent && !isBlocked ? ' onclick="event.stopPropagation(); toggleSpam(\'' + escapeHtml(user.name) + '\')"' : '';
+                var badgeText = isSpam ? 'Снять спам' : 'Спам';
+                var badgeClass = isSpam ? 'spam-badge' : 'private-badge';
+                var blockedHtml = isBlocked ? '<span class="blocked-badge">🔒 Заблокирован</span>' : '';
+                
+                var userClass = 'user-item';
+                if (isSpam) userClass += ' spam';
+                if (isBlocked) userClass += ' blocked';
+                
+                html += '<div class="' + userClass + '"' + onClick + '>';
+                html += '<div class="user-avatar ' + (isSpam ? 'spam' : '') + (isBlocked ? ' blocked' : '') + '"></div>';
+                html += '<div class="user-name">' + escapeHtml(user.name) + (isCurrent ? ' (Вы)' : '') + sessionsHtml + statsHtml + '</div>';
+                html += unreadHtml;
+                if (!isCurrent && !isBlocked) html += '<span class="' + badgeClass + '"' + onSpam + '>' + badgeText + '</span>';
+                if (isBlocked) html += blockedHtml;
+                html += '</div>';
+            }
+            usersList.innerHTML = html;
+        }
         
         // === ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ===
         function getSessionId() {
@@ -1143,20 +1270,35 @@ HTML_PAGE = r'''<!DOCTYPE html>
                 }
             }
             if (existing) return;
+            
             var tab = document.createElement('button');
             tab.className = 'chat-tab private';
             tab.setAttribute('data-chat', username);
-            tab.innerHTML = username + ' <span class="close-tab">✖</span>';
+            tab.innerHTML = username;
+            
+            // Добавляем счётчик если есть
+            var count = unreadCounts[username] || 0;
+            if (count > 0) {
+                var span = document.createElement('span');
+                span.className = 'tab-unread';
+                span.textContent = count > 99 ? '99+' : count;
+                tab.appendChild(span);
+            }
+            
             tab.onclick = function(e) {
                 if (e.target.className !== 'close-tab') window.switchChat(username);
             };
-            var closeSpan = tab.querySelector('.close-tab');
-            if (closeSpan) {
-                closeSpan.onclick = function(e) {
-                    e.stopPropagation();
-                    window.closePrivateChat(username);
-                };
-            }
+            
+            // Добавляем крестик
+            var closeSpan = document.createElement('span');
+            closeSpan.className = 'close-tab';
+            closeSpan.textContent = '✖';
+            closeSpan.onclick = function(e) {
+                e.stopPropagation();
+                window.closePrivateChat(username);
+            };
+            tab.appendChild(closeSpan);
+            
             tabsContainer.appendChild(tab);
         }
         
@@ -1175,6 +1317,11 @@ HTML_PAGE = r'''<!DOCTYPE html>
         };
         
         window.switchChat = function(chatId) {
+            // Если переключаемся на приватный чат - сбрасываем счётчик
+            if (chatId !== 'main') {
+                clearUnreadCount(chatId);
+            }
+            
             currentChat = chatId;
             var tabs = document.querySelectorAll('.chat-tab');
             for (var i = 0; i < tabs.length; i++) {
@@ -1182,6 +1329,8 @@ HTML_PAGE = r'''<!DOCTYPE html>
                 var tabChat = tab.getAttribute('data-chat');
                 if ((chatId === 'main' && tabChat === 'main') || (chatId !== 'main' && tabChat === chatId)) {
                     tab.classList.add('active');
+                    // Сбрасываем фон уведомления
+                    tab.style.background = '';
                 } else {
                     tab.classList.remove('active');
                 }
@@ -1206,7 +1355,6 @@ HTML_PAGE = r'''<!DOCTYPE html>
                 showSystemMessage('Нельзя начать чат с самим собой');
                 return;
             }
-            // Проверяем, не заблокирован ли пользователь
             if (blockedUsers.includes(username)) {
                 showSystemMessage('⚠️ Невозможно начать чат с заблокированным пользователем');
                 return;
@@ -1233,55 +1381,25 @@ HTML_PAGE = r'''<!DOCTYPE html>
             return false;
         }
         
-        function filterUsers() {
-            var searchValue = userSearch.value.toLowerCase();
-            var filtered = [];
-            for (var i = 0; i < allUsers.length; i++) {
-                var user = allUsers[i];
-                if (searchValue && user.name.toLowerCase().indexOf(searchValue) === -1) continue;
-                if (currentUserFilter === 'spam' && !isSpamUser(user.name)) continue;
-                if (currentUserFilter === 'clean' && isSpamUser(user.name)) continue;
-                filtered.push(user);
+        window.setUserFilter = function(filter) {
+            currentUserFilter = filter;
+            var btns = document.querySelectorAll('.filter-btn');
+            for (var i = 0; i < btns.length; i++) {
+                var btn = btns[i];
+                btn.classList.remove('active');
+                if (btn.getAttribute('data-filter') === filter) btn.classList.add('active');
             }
-            filtered.sort(function(a, b) {
-                if (a.name === currentUser) return -1;
-                if (b.name === currentUser) return 1;
-                if (a.name < b.name) return -1;
-                if (a.name > b.name) return 1;
-                return 0;
-            });
-            if (filtered.length === 0) {
-                usersList.innerHTML = '<div style="padding:10px;text-align:center;">Пользователи не найдены</div>';
-                return;
+            updateUsersListDisplay();
+        };
+        
+        window.toggleUsers = function() {
+            if (usersSidebar.classList.contains('show')) {
+                usersSidebar.classList.remove('show');
+            } else {
+                usersSidebar.classList.add('show');
+                updateUsersListDisplay();
             }
-            var html = '';
-            for (var i = 0; i < filtered.length; i++) {
-                var user = filtered[i];
-                var isCurrent = (user.name === currentUser);
-                var isSpam = isSpamUser(user.name);
-                var isBlocked = isBlockedUser(user.name);
-                var sessionsHtml = (user.sessions > 1) ? ' (' + user.sessions + ' вкладки)' : '';
-                var spamCount = spamStats[user.name] || 0;
-                var statsHtml = spamCount > 0 ? ' ⚠️' + spamCount : '';
-                var onClick = (isCurrent || isBlocked) ? '' : ' onclick="startPrivateChat(\'' + escapeHtml(user.name) + '\')"';
-                var onSpam = !isCurrent && !isBlocked ? ' onclick="event.stopPropagation(); toggleSpam(\'' + escapeHtml(user.name) + '\')"' : '';
-                var badgeText = isSpam ? 'Снять спам' : 'Спам';
-                var badgeClass = isSpam ? 'spam-badge' : 'private-badge';
-                var blockedHtml = isBlocked ? '<span class="blocked-badge">🔒 Заблокирован</span>' : '';
-                
-                var userClass = 'user-item';
-                if (isSpam) userClass += ' spam';
-                if (isBlocked) userClass += ' blocked';
-                
-                html += '<div class="' + userClass + '"' + onClick + '>';
-                html += '<div class="user-avatar ' + (isSpam ? 'spam' : '') + (isBlocked ? ' blocked' : '') + '"></div>';
-                html += '<div class="user-name">' + escapeHtml(user.name) + (isCurrent ? ' (Вы)' : '') + sessionsHtml + statsHtml + '</div>';
-                if (!isCurrent && !isBlocked) html += '<span class="' + badgeClass + '"' + onSpam + '>' + badgeText + '</span>';
-                if (isBlocked) html += blockedHtml;
-                html += '</div>';
-            }
-            usersList.innerHTML = html;
-        }
+        };
         
         window.toggleSpam = function(username) {
             if (isSpamUser(username)) {
@@ -1301,42 +1419,7 @@ HTML_PAGE = r'''<!DOCTYPE html>
                 spamList.push(username);
                 showSystemMessage(username + ' отмечен как спам');
             }
-            filterUsers();
-        };
-        
-        window.setUserFilter = function(filter) {
-            currentUserFilter = filter;
-            var btns = document.querySelectorAll('.filter-btn');
-            for (var i = 0; i < btns.length; i++) {
-                var btn = btns[i];
-                btn.classList.remove('active');
-                if (btn.getAttribute('data-filter') === filter) btn.classList.add('active');
-            }
-            filterUsers();
-        };
-        
-        window.toggleUsers = function() {
-            if (usersSidebar.classList.contains('show')) {
-                usersSidebar.classList.remove('show');
-            } else {
-                usersSidebar.classList.add('show');
-                filterUsers();
-            }
-        };
-        
-        window.changeUsername = function() {
-            var newName = prompt('Введите новое имя (макс. 20 символов):', currentUser);
-            if (newName && newName.trim() && newName.trim() !== currentUser) {
-                var trimmedName = newName.trim().substring(0, 20);
-                if (ws && ws.readyState === WebSocket.OPEN) {
-                    ws.send(JSON.stringify({ 
-                        type: 'change_username', 
-                        new_username: trimmedName 
-                    }));
-                } else {
-                    showSystemMessage('❌ Нет соединения с сервером');
-                }
-            }
+            updateUsersListDisplay();
         };
         
         window.sendMessage = function() {
@@ -1352,7 +1435,8 @@ HTML_PAGE = r'''<!DOCTYPE html>
                 ws.send(JSON.stringify({ type: 'typing', is_typing: false }));
                 isTyping = false;
             }
-            // Автоматически скроллим после отправки
+            // Сбрасываем высоту
+            messageInput.style.height = 'auto';
             setTimeout(scrollToBottom, 10);
         };
         
@@ -1380,11 +1464,17 @@ HTML_PAGE = r'''<!DOCTYPE html>
             for (var i = 0; i < spamList.length; i++) {
                 if (spamList[i] === message.from) isSpam = true;
             }
-            // Проверяем, не заблокирован ли отправитель
+            
             if (!isFromMe && isBlockedUser(message.from)) {
-                return; // Игнорируем сообщения от заблокированных
+                return;
             }
             if (!isFromMe && isSpam) return;
+            
+            // Увеличиваем счётчик непрочитанных, если не от себя и не текущий чат
+            if (!isFromMe && currentChat !== message.from) {
+                incrementUnreadCount(message.from);
+            }
+            
             if (!privateChats.has(otherUser)) {
                 privateChats.set(otherUser, []);
                 addPrivateChatTab(otherUser);
@@ -1401,7 +1491,7 @@ HTML_PAGE = r'''<!DOCTYPE html>
             allUsers = users;
             usersCountSpan.textContent = count;
             onlineCountSpan.textContent = count + ' онлайн';
-            filterUsers();
+            updateUsersListDisplay();
         }
         
         function handleMessage(data) {
@@ -1419,14 +1509,6 @@ HTML_PAGE = r'''<!DOCTYPE html>
                 case 'system':
                     showSystemMessage(data.message);
                     if (data.users_count) onlineCountSpan.textContent = data.users_count + ' онлайн';
-                    if (data.message && data.message.indexOf('Вы успешно сменили имя') !== -1) {
-                        var match = data.message.match(/на (.+)$/);
-                        if (match && match[1]) {
-                            currentUser = match[1];
-                            currentUsernameSpan.textContent = currentUser;
-                            localStorage.setItem('chat_username', currentUser);
-                        }
-                    }
                     break;
                 case 'users_list':
                     updateUsersList(data.users, data.count);
@@ -1436,20 +1518,16 @@ HTML_PAGE = r'''<!DOCTYPE html>
                     break;
                 case 'spam_list':
                     spamList = data.spammers || [];
-                    filterUsers();
+                    updateUsersListDisplay();
                     break;
                 case 'spam_stats':
                     spamStats = data.stats || {};
-                    filterUsers();
-                    break;
-                case 'blocked_users':
-                    blockedUsers = data.users || [];
-                    filterUsers();
+                    updateUsersListDisplay();
                     break;
             }
         }
         
-        // === ПОДКЛЮЧЕНИЕ К ЧАТУ ПОСЛЕ АВТОРИЗАЦИИ ===
+        // === ПОДКЛЮЧЕНИЕ К ЧАТУ ===
         function connectToChat(email, username) {
             sessionId = getSessionId();
             var protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -1512,7 +1590,6 @@ HTML_PAGE = r'''<!DOCTYPE html>
                 if (result.success) {
                     currentEmail = email;
                     currentUser = result.username;
-                    localStorage.setItem('chat_username', currentUser);
                     
                     authScreen.classList.add('hidden');
                     setTimeout(function() {
@@ -1546,21 +1623,30 @@ HTML_PAGE = r'''<!DOCTYPE html>
         });
         
         sendButton.onclick = window.sendMessage;
-        changeNameBtn.onclick = window.changeUsername;
         toggleUsersBtn.onclick = window.toggleUsers;
-        userSearch.onkeyup = filterUsers;
+        userSearch.onkeyup = function() { updateUsersListDisplay(); };
+        
+        // Поведение клавиши Enter в textarea
+        messageInput.addEventListener('keydown', function(e) {
+            if (e.key === 'Enter') {
+                if (isMobile) {
+                    // На мобильных - новая строка (ничего не делаем, стандартное поведение)
+                    return;
+                } else {
+                    // На десктопе: если без Shift - отправка
+                    if (!e.shiftKey) {
+                        e.preventDefault();
+                        window.sendMessage();
+                    }
+                    // С Shift - новая строка (стандартное поведение)
+                }
+            }
+        });
         
         // Автоматическое изменение высоты textarea
         messageInput.addEventListener('input', function() {
             this.style.height = 'auto';
             this.style.height = Math.min(this.scrollHeight, 120) + 'px';
-        });
-        
-        messageInput.addEventListener('keypress', function(e) {
-            if (e.key === 'Enter' && !e.shiftKey) {
-                e.preventDefault();
-                window.sendMessage();
-            }
         });
         
         // Индикатор печатания
@@ -1594,7 +1680,6 @@ HTML_PAGE = r'''<!DOCTYPE html>
             mainTab.onclick = function() { window.switchChat('main'); };
         }
         
-        // Сохраняем историю сообщений глобально
         window.addMessageToChat = addMessageToChat;
     </script>
 </body>
@@ -1616,7 +1701,6 @@ async def handle_login(request):
         if not email or not password:
             return web.json_response({'success': False, 'message': 'Введите email и пароль'})
         
-        # Проверяем пользователя
         success, message = user_auth.verify_password(email, password)
         
         if success:
@@ -1648,7 +1732,6 @@ async def websocket_handler(request):
         username = data.get('username', '').strip()
         session_id = data.get('session_id', '')
         
-        # Проверяем, не заблокирован ли пользователь перед подключением
         if user_auth.is_user_blocked(email):
             await ws.send_str(json.dumps({
                 'type': 'system',
@@ -1704,5 +1787,7 @@ if __name__ == "__main__":
     print(f"🚀 Сервер запущен на порту {PORT}")
     print(f"📧 Авторизация через email и пароль")
     print(f"📁 Файл пользователей: {USERS_FILE}")
-    print(f"🔒 Поддерживается блокировка пользователей")
+    print(f"🔒 Блокировка пользователей поддерживается")
+    print(f"👤 Имена пользователей фиксированы (берутся из JSON)")
+    print(f"📱 На мобильных Enter - новая строка, кнопка - отправка")
     web.run_app(app, host='0.0.0.0', port=PORT)
